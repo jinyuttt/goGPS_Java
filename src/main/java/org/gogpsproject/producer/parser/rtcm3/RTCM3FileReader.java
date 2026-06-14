@@ -67,6 +67,7 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	private HashMap<Integer,EphQzs> ephsQzs = new HashMap<Integer,EphQzs>();
 	private HashMap<Integer,EphIrnss> ephsIrnss = new HashMap<Integer,EphIrnss>();
 	private int week;
+	private Coordinates stationCoords = null;  // 基站坐标
 	
 	private Vector<StreamEventListener> streamEventListeners = new Vector<StreamEventListener>();
 
@@ -80,10 +81,21 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	 */
 	@Override
 	public Coordinates getDefinedPosition() {
-		Coordinates coord = Coordinates.globalXYZInstance(0.0, 0.0, 0.0); //new Coordinates(new SimpleMatrix(3, 1));
-		//coord.setXYZ(0.0, 0.0, 0.0 );
+		// 如果有本地存储的基站坐标，返回基站坐标作为初始位置
+		if (stationCoords != null && stationCoords.isValidXYZ()) {
+			System.out.printf("[DEBUG] 使用本地存储的基站坐标: X=%.4f Y=%.4f Z=%.4f%n",
+					stationCoords.getX(), stationCoords.getY(), stationCoords.getZ());
+			return stationCoords;
+		}
+		// 尝试从 RTCM3Client 获取基站位置
+		if (reader != null && reader.getMasterPosition() != null) {
+			System.out.printf("[DEBUG] 从RTCM3Client获取基站坐标: X=%.4f Y=%.4f Z=%.4f%n",
+					reader.getMasterPosition().getX(), reader.getMasterPosition().getY(), reader.getMasterPosition().getZ());
+			return reader.getMasterPosition();
+		}
+		// 否则返回默认值 (0,0,0)
+		Coordinates coord = Coordinates.globalXYZInstance(0.0, 0.0, 0.0);
 		coord.computeGeodetic();
-		// TODO should return null?
 		return coord;
 	}
 
@@ -159,6 +171,9 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 						// 存储GPS星历数据（必须放在子类之后）
 						EphGps eph = (EphGps)o;
 						ephsGps.put(new Integer(eph.getSatID()), eph);
+					} else if(o instanceof Coordinates){
+						// 存储基站坐标
+						stationCoords = (Coordinates) o;
 					}
 				}
 			}
@@ -206,6 +221,11 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 						} else if (o instanceof EphGps) {
 							EphGps eph = (EphGps) o;
 							ephsGps.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof Coordinates) {
+							// 存储基站坐标
+							stationCoords = (Coordinates) o;
+							System.out.printf("[DEBUG] 读取到基站坐标: X=%.4f Y=%.4f Z=%.4f%n",
+									stationCoords.getX(), stationCoords.getY(), stationCoords.getZ());
 						}
 						return o;
 					}

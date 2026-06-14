@@ -97,7 +97,10 @@ public class Coordinates implements Streamable{
 		double Y = this.ecef.get(1);
 		double Z = this.ecef.get(2);
 
-		//this.geod = new SimpleMatrix(3, 1);
+		// 如果 geod 为 null，则初始化
+		if (this.geod == null) {
+			this.geod = new SimpleMatrix(3, 1);
+		}
 
 		double a = Constants.WGS84_SEMI_MAJOR_AXIS;
 		double e = Constants.WGS84_ECCENTRICITY;
@@ -226,6 +229,8 @@ public class Coordinates implements Streamable{
 		this.ecef.set(0, 0, x);
 		this.ecef.set(1, 0, y);
 		this.ecef.set(2, 0, z);
+		// 清除 geodetic 缓存，以便下次需要时重新计算
+		this.geod = null;
 	}
 	public void setGeod( double lat, double lon, double alt ){
 		//if(this.ecef==null) this.ecef = new SimpleMatrix(3, 1);
@@ -241,11 +246,24 @@ public class Coordinates implements Streamable{
 	}
 
 	public boolean isValidXYZ(){
-		return (this.ecef != null && this.ecef.elementSum() != 0 
-        && !Double.isNaN(this.ecef.get(0)) && !Double.isNaN(this.ecef.get(1)) && !Double.isNaN(this.ecef.get(2))
-        && !Double.isInfinite(this.ecef.get(0)) && !Double.isInfinite(this.ecef.get(1)) && !Double.isInfinite(this.ecef.get(2))
-        && ( ecef.get(0) != 0 && ecef.get(1)!=0 && ecef.get(2)!= 0 )
-		    );
+		if (this.ecef == null) return false;
+		
+		double x = this.ecef.get(0);
+		double y = this.ecef.get(1);
+		double z = this.ecef.get(2);
+		
+		// 检查是否为 NaN 或 Inf
+		if (Double.isNaN(x) || Double.isNaN(y) || Double.isNaN(z)) return false;
+		if (Double.isInfinite(x) || Double.isInfinite(y) || Double.isInfinite(z)) return false;
+		
+		// 检查是否全为零
+		if (x == 0 && y == 0 && z == 0) return false;
+		
+		// 检查坐标是否在合理范围内（距离地球中心不超过 50,000 km）
+		double r = Math.sqrt(x*x + y*y + z*z);
+		if (r > 5.0E7 || r < 6.0E6) return false; // 合理范围: 6,000 km - 50,000 km
+		
+		return true;
 	}
 
 	public Object clone(){
@@ -257,7 +275,7 @@ public class Coordinates implements Streamable{
 	public void cloneInto(Coordinates c){
 		c.ecef = this.ecef.copy();
 		c.enu = this.enu.copy();
-		c.geod = this.geod.copy();
+		c.geod = this.geod != null ? this.geod.copy() : null;
 
 		if(refTime!=null) c.refTime = (Time)refTime.clone();
 	}

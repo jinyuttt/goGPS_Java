@@ -68,8 +68,10 @@ public abstract class EphemerisSystem {
 					// Compute clock corrected transmission time
 					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange);
 			
-					// BeiDou time (BDT) is 14 seconds ahead of GPS time
-					double tBDT = tGPS + 14.0;
+					// BDT (BeiDou Time) = GPST - 14 seconds
+					// BDT started at 2006-01-01 00:00:00 UTC, GPST started at 1980-01-06 00:00:00 UTC
+					// For the same physical instant, BDT has 14 seconds less elapsed than GPST
+					double tBDT = tGPS - 14.0;
 			
 					// Compute eccentric anomaly
 					double Ek = computeEccentricAnomalyBDS(tBDT, eph);
@@ -78,7 +80,12 @@ public abstract class EphemerisSystem {
 					double A = eph.getRootA() * eph.getRootA();
 			
 					// Time from the ephemerides reference epoch
-					double tk = checkGpsTime(tBDT - eph.getToe());
+					// tBDT 是 BDT (tGPS - 14)，toe 存储的是 GPS 秒（因为 week 已转换为 GPS week）
+					// 所以 tk = tGPS - toe = (tBDT + 14) - toe
+					double toeGPST = eph.getToe(); // toe 已经是 GPS 秒
+					double tk = checkGpsTime((tBDT + 14.0) - toeGPST);
+					System.err.printf("[DEBUG BDS SatPos] tBDT=%.1f, toe=%.1f (GPS秒), tk=%.1f%n", 
+							tBDT, toeGPST, tk);
 			
 					// Position computation using BDS constants
 					double fk = Math.atan2(Math.sqrt(1 - Math.pow(eph.getE(), 2))
@@ -104,8 +111,16 @@ public abstract class EphemerisSystem {
 							y1 * Math.sin(ik));
 					sp.setSatelliteClockError(satelliteClockError);
 			
+					// 调试：打印卫星位置和轨道参数
+					double satR = Math.sqrt(sp.getX()*sp.getX() + sp.getY()*sp.getY() + sp.getZ()*sp.getZ());
+					System.err.printf("[DEBUG BDS SatPos] PRN=%d X=%.2f Y=%.2f Z=%.2f (r=%.1f km, tBDT=%.1f, toe=%.1f)%n", 
+							satID, sp.getX(), sp.getY(), sp.getZ(), satR/1000, tBDT, eph.getToe());
+					System.err.printf("[DEBUG BDS SatPos] 轨道: A=%.1f km, e=%.6f, Omega0=%.6f rad%n", 
+							A/1000, eph.getE(), eph.getOmega0());
+			
 					// Apply the correction due to the Earth rotation during signal travel time
-					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS);
+					// 使用 BDT 时间计算地球自转校正
+					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tBDT);
 					sp.setSMMultXYZ(R);
 			
 					return sp;

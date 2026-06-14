@@ -294,7 +294,9 @@ public class Satellites {
 
 //        System.out.println("getElevation: " + id + "::" + rover.topo[i].getElevation() ); 
         // Check if satellite elevation is higher than cutoff
-        if (rover.topo[i].getElevation() > cutoff) {
+        // 如果仰角为 NaN（接收机位置未知），则不进行仰角过滤
+        double elevation = rover.topo[i].getElevation();
+        if (Double.isNaN(elevation) || elevation > cutoff) {
           
           avail.put(id, pos[i]);
           typeAvail.add(satType);

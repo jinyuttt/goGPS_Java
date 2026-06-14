@@ -966,6 +966,19 @@ public class RTCM3Client implements Runnable, StreamResource, StreamEventProduce
 					System.out.println(date1 + " - RTCM message "+msgtype+" received and decoded");
 				} else {
 					o = dec.decode(bits, week);
+					// 调试：打印解码的消息类型和结果
+					if (o instanceof Observations) {
+						Observations obs = (Observations) o;
+						System.out.printf("[DEBUG] 解码观测: msgtype=%d, 卫星数=%d, 时间=%s%n", 
+								msgtype, obs.getNumSat(), obs.getRefTime());
+					} else if (o != null) {
+						System.out.printf("[DEBUG] 解码非观测: msgtype=%d, 类型=%s%n", 
+								msgtype, o.getClass().getSimpleName());
+					} else {
+						System.out.printf("[DEBUG] 解码失败: msgtype=%d 返回null%n", msgtype);
+					}
+					// 打印所有解码成功的消息（用于调试）
+					System.out.printf("[DEBUG] 消息类型: %d -> %s%n", msgtype, o != null ? o.getClass().getSimpleName() : "null");
 					if(o instanceof Observations){
 						if (((Observations) o).getRefTime().getDayOfYear() == 11) {
 							week++;
@@ -985,8 +998,8 @@ public class RTCM3Client implements Runnable, StreamResource, StreamEventProduce
 					addEphemeris((org.gogpsproject.ephemeris.EphGps) o);
 				}
 			}else{
-				//System.err.println("missing RTCM message parser "+msgtype);
-				// missing message parser
+				// 调试：打印未识别的消息类型
+				System.out.printf("[DEBUG] 未识别消息类型: msgtype=%d (无解码器)%n", msgtype);
 			}
 
 			// CRC
