@@ -396,4 +396,8 @@ public class ObservationSet implements Streamable {
   public void setInUse(boolean inUse) {
     this.inUse = inUse;
   }
+
+    public void setHalfCycleAmb(int i, boolean b) {
+
+    }
 }

@@ -58,7 +58,59 @@ public abstract class EphemerisSystem {
 		double obsPseudorange = obs.getSatByIDType(satID, satType).getPseudorange(0);
 		
 //		char satType2 = eph.getSatType() ;
-		if(satType != 'R'){  // other than GLONASS
+		if(satType == 'C'){  // BeiDou
+			
+//					System.out.println("### BeiDou data");
+			
+					// Compute satellite clock error
+					double satelliteClockError = computeSatelliteClockError(unixTime, eph, obsPseudorange);
+			
+					// Compute clock corrected transmission time
+					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange);
+			
+					// BeiDou time (BDT) is 14 seconds ahead of GPS time
+					double tBDT = tGPS + 14.0;
+			
+					// Compute eccentric anomaly
+					double Ek = computeEccentricAnomalyBDS(tBDT, eph);
+			
+					// Semi-major axis
+					double A = eph.getRootA() * eph.getRootA();
+			
+					// Time from the ephemerides reference epoch
+					double tk = checkGpsTime(tBDT - eph.getToe());
+			
+					// Position computation using BDS constants
+					double fk = Math.atan2(Math.sqrt(1 - Math.pow(eph.getE(), 2))
+							* Math.sin(Ek), Math.cos(Ek) - eph.getE());
+					double phi = fk + eph.getOmega();
+					phi = Math.IEEEremainder(phi, 2 * Math.PI);
+					double u = phi + eph.getCuc() * Math.cos(2 * phi) + eph.getCus()
+							* Math.sin(2 * phi);
+					double r = A * (1 - eph.getE() * Math.cos(Ek)) + eph.getCrc()
+							* Math.cos(2 * phi) + eph.getCrs() * Math.sin(2 * phi);
+					double ik = eph.getI0() + eph.getiDot() * tk + eph.getCic() * Math.cos(2 * phi)
+							+ eph.getCis() * Math.sin(2 * phi);
+					double Omega = eph.getOmega0()
+							+ (eph.getOmegaDot() - Constants.OMEGAE_DOT_BDS) * tk
+							- Constants.OMEGAE_DOT_BDS * eph.getToe();
+					Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
+					double x1 = Math.cos(u) * r;
+					double y1 = Math.sin(u) * r;
+			
+					// Fill in the satellite position matrix
+					SatellitePosition sp = new SatellitePosition(unixTime,satID, satType, x1 * Math.cos(Omega) - y1 * Math.cos(ik) * Math.sin(Omega),
+							x1 * Math.sin(Omega) + y1 * Math.cos(ik) * Math.cos(Omega),
+							y1 * Math.sin(ik));
+					sp.setSatelliteClockError(satelliteClockError);
+			
+					// Apply the correction due to the Earth rotation during signal travel time
+					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS);
+					sp.setSMMultXYZ(R);
+			
+					return sp;
+					
+		} else if(satType != 'R'){  // other than GLONASS (GPS, Galileo, QZSS)
 			
 //					System.out.println("### other than GLONASS data");
 			
@@ -133,8 +185,8 @@ public abstract class EphemerisSystem {
 					double Za = eph.getZa();  // acceleration due to lunar-solar gravitational perturbation along Z at ephemeris reference time
 					/* NOTE:  Xa,Ya,Za are considered constant within the integration interval (i.e. toe ?}15 minutes) */
 				
-					double tn = eph.getTauN();    
-					float gammaN = eph.getGammaN();
+					double tn = eph.getTauN();
+					double gammaN = eph.getGammaN();
 					double tk = eph.gettk();   
 					double En = eph.getEn();
 					double toc = eph.getToc();
@@ -682,6 +734,54 @@ public abstract class EphemerisSystem {
 
 		// Computed mean motion [rad/sec]
 		double n0 = Math.sqrt(Constants.EARTH_GRAVITATIONAL_CONSTANT / Math.pow(A, 3));
+
+		// Corrected mean motion [rad/sec]
+		double n = n0 + eph.getDeltaN();
+
+		// Mean anomaly
+		double Mk = eph.getM0() + n * tk;
+
+		// Eccentric anomaly starting value
+		Mk = Math.IEEEremainder(Mk + 2 * Math.PI, 2 * Math.PI);
+		double Ek = Mk;
+
+		int i;
+		double EkOld, dEk;
+
+		// Eccentric anomaly iterative computation
+		int maxNumIter = 12;
+		for (i = 0; i < maxNumIter; i++) {
+			EkOld = Ek;
+			Ek = Mk + eph.getE() * Math.sin(Ek);
+			dEk = Math.IEEEremainder(Ek - EkOld, 2 * Math.PI);
+			if (Math.abs(dEk) < 1e-12)
+				break;
+		}
+
+		// TODO Display/log warning message
+		if (i == maxNumIter)
+			System.out.println("Warning: Eccentric anomaly does not converge.");
+
+		return Ek;
+
+	}
+
+	/**
+	 * @param time
+	 *            (BeiDou time in seconds)
+	 * @param eph
+	 * @return Eccentric anomaly for BeiDou satellites
+	 */
+	protected double computeEccentricAnomalyBDS(double time, EphGps eph) {
+
+		// Semi-major axis
+		double A = eph.getRootA() * eph.getRootA();
+
+		// Time from the ephemerides reference epoch
+		double tk = checkGpsTime(time - eph.getToe());
+
+		// Computed mean motion [rad/sec] using BeiDou GM constant
+		double n0 = Math.sqrt(Constants.GM_BDS / Math.pow(A, 3));
 
 		// Corrected mean motion [rad/sec]
 		double n = n0 + eph.getDeltaN();

@@ -25,8 +25,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Vector;
+import java.util.concurrent.ConcurrentHashMap;
 
+import org.gogpsproject.ephemeris.EphBds;
+import org.gogpsproject.ephemeris.EphGal;
+import org.gogpsproject.ephemeris.EphGlo;
 import org.gogpsproject.ephemeris.EphGps;
+import org.gogpsproject.ephemeris.EphIrnss;
+import org.gogpsproject.ephemeris.EphQzs;
 import org.gogpsproject.ephemeris.EphemerisSystem;
 import org.gogpsproject.positioning.Coordinates;
 import org.gogpsproject.positioning.SatellitePosition;
@@ -54,7 +60,12 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	private Observations obs = null;
 	private IonoGps iono = null;
 	// TODO support past times, now keep only last broadcast data
-	private HashMap<Integer,EphGps> ephs = new HashMap<Integer,EphGps>();
+	private HashMap<Integer,EphGps> ephsGps = new HashMap<Integer,EphGps>();
+	private HashMap<Integer,EphGlo> ephsGlo = new HashMap<Integer,EphGlo>();
+	private HashMap<Integer,EphGal> ephsGal = new HashMap<Integer,EphGal>();
+	private HashMap<Integer,EphBds> ephsBds = new HashMap<Integer,EphBds>();
+	private HashMap<Integer,EphQzs> ephsQzs = new HashMap<Integer,EphQzs>();
+	private HashMap<Integer,EphIrnss> ephsIrnss = new HashMap<Integer,EphIrnss>();
 	private int week;
 	
 	private Vector<StreamEventListener> streamEventListeners = new Vector<StreamEventListener>();
@@ -81,6 +92,10 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	 */
 	@Override
 	public Observations getCurrentObservations() {
+		if (obs == null) {
+			// 如果当前没有观测数据，尝试获取下一个
+			getNextObservations();
+		}
 		return obs;
 	}
 
@@ -118,11 +133,86 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 				if (c == 211) {
 					Object o = reader.readMessage(in);
 					if(o instanceof Observations){
+						this.obs = (Observations)o;  // 更新当前观测数据
 						return (Observations)o;
+					} else if(o instanceof EphGlo){
+						// 存储GLONASS星历数据
+						EphGlo eph = (EphGlo)o;
+						ephsGlo.put(new Integer(eph.getSatID()), eph);
+					} else if(o instanceof EphBds){
+						// 存储BeiDou星历数据
+						EphBds eph = (EphBds)o;
+						ephsBds.put(new Integer(eph.getSatID()), eph);
+					} else if(o instanceof EphGal){
+						// 存储Galileo星历数据
+						EphGal eph = (EphGal)o;
+						ephsGal.put(new Integer(eph.getSatID()), eph);
+					} else if(o instanceof EphQzs){
+						// 存储QZSS星历数据
+						EphQzs eph = (EphQzs)o;
+						ephsQzs.put(new Integer(eph.getSatID()), eph);
+					} else if(o instanceof EphIrnss){
+						// 存储IRNSS星历数据
+						EphIrnss eph = (EphIrnss)o;
+						ephsIrnss.put(new Integer(eph.getSatID()), eph);
+					} else if(o instanceof EphGps){
+						// 存储GPS星历数据（必须放在子类之后）
+						EphGps eph = (EphGps)o;
+						ephsGps.put(new Integer(eph.getSatID()), eph);
 					}
 				}
 			}
 		}catch(IOException e){
+			e.printStackTrace();
+		}
+		this.obs = null;  // 文件结束时清空
+		return null;
+	}
+
+	/**
+	 * 读取下一条解码对象（所有类型均返回）。
+	 * 可返回: Observations, EphGps/EphBds/EphGal等, Coordinates, SsrOrbitClock,
+	 * RefStationParams, GloCodePhaseBias, 或 null（消息被跳过/无解码器）。
+	 */
+	public Object readNext() {
+		try {
+			while (in.available() > 0) {
+				int c = in.read();
+				if (c == 211) { // 0xD3 preamble
+					Object o = reader.readMessage(in);
+					if (o != null) {
+						// 临时调试：打印对象类型
+
+						System.out.printf("[DEBUG readNext] 对象类型: %s%n", o.getClass().getName());
+
+						// 存储星历到 HashMap（与 getNextObservations 保持一致）
+						// 注意：子类必须放在父类 EphGps 之前判断，否则子类对象会匹配到父类分支
+						if (o instanceof EphGlo) {
+							EphGlo eph = (EphGlo) o;
+							ephsGlo.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphBds) {
+							EphBds eph = (EphBds) o;
+							System.out.println("当前北斗星历数量: " + ephsBds.size());
+							ephsBds.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphGal) {
+							EphGal eph = (EphGal) o;
+							ephsGal.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphQzs) {
+							EphQzs eph = (EphQzs) o;
+							ephsQzs.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphIrnss) {
+							EphIrnss eph = (EphIrnss) o;
+							ephsIrnss.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphGps) {
+							EphGps eph = (EphGps) o;
+							ephsGps.put(new Integer(eph.getSatID()), eph);
+						}
+						return o;
+					}
+					// null = 解码失败/截断，继续读下一条
+				}
+			}
+		} catch (IOException e) {
 			e.printStackTrace();
 		}
 		return null;
@@ -146,16 +236,56 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	@Override
 	public SatellitePosition getGpsSatPosition(Observations obs, int satID, char satType, double receiverClockError) {
 		
-		EphGps eph = ephs.get(new Integer(satID));
-
-		if (eph != null) {
-			
-//			char satType = eph.getSatType();
-			
-			SatellitePosition sp = computePositionGps(obs, satID, satType, eph, receiverClockError);
-			return sp;
+		// 根据卫星类型从对应的HashMap中获取星历数据
+		switch (satType) {
+			case 'G': // GPS
+				EphGps ephGps = ephsGps.get(new Integer(satID));
+				if (ephGps != null) {
+					return computePositionGps(obs, satID, satType, ephGps, receiverClockError);
+				}
+				break;
+			case 'R': // GLONASS
+				EphGlo ephGlo = ephsGlo.get(new Integer(satID));
+				if (ephGlo != null) {
+					// TODO: 实现GLONASS位置计算
+					// return computePositionGlo(obs, satID, satType, ephGlo, receiverClockError);
+				}
+				break;
+			case 'E': // Galileo
+				EphGal ephGal = ephsGal.get(new Integer(satID));
+				if (ephGal != null) {
+					// TODO: 实现Galileo位置计算
+					// return computePositionGal(obs, satID, satType, ephGal, receiverClockError);
+				}
+				break;
+			case 'C': // BeiDou
+				EphBds ephBds = ephsBds.get(new Integer(satID));
+				if (ephBds != null) {
+					// 临时调试：打印星历查找成功
+					System.out.printf("[DEBUG] 找到星历: PRN=%d type=%c, rootA=%.0f%n", satID, satType, ephBds.getRootA());
+					return computePositionGps(obs, satID, satType, ephBds, receiverClockError);
+				} else {
+					// 临时调试：打印HashMap大小和key列表
+					System.out.printf("[DEBUG] 未找到星历: PRN=%d type=%c, HashMap大小=%d, keys=%s%n", 
+							satID, satType, ephsBds.size(), ephsBds.keySet());
+				}
+				break;
+			case 'J': // QZSS
+				EphQzs ephQzs = ephsQzs.get(new Integer(satID));
+				if (ephQzs != null) {
+					// TODO: 实现QZSS位置计算
+					// return computePositionQzs(obs, satID, satType, ephQzs, receiverClockError);
+				}
+				break;
+			case 'I': // IRNSS
+				EphIrnss ephIrnss = ephsIrnss.get(new Integer(satID));
+				if (ephIrnss != null) {
+					// TODO: 实现IRNSS位置计算
+					// return computePositionIrnss(obs, satID, satType, ephIrnss, receiverClockError);
+				}
+				break;
 		}
-		return null ;
+		return null;
 	}
 
 	/* (non-Javadoc)

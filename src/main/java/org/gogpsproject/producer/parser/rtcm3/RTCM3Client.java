@@ -204,6 +204,65 @@ public class RTCM3Client implements Runnable, StreamResource, StreamEventProduce
 		decodeMap.put(new Integer(1007), new Decode1007Msg(this));
 		decodeMap.put(new Integer(1008), new Decode1008Msg(this));
 		decodeMap.put(new Integer(1012), new Decode1012Msg());
+		decodeMap.put(new Integer(1019), new Decode1019Msg());
+		decodeMap.put(new Integer(1020), new Decode1020Msg());
+		decodeMap.put(new Integer(1033), new Decode1033Msg(this));
+		decodeMap.put(new Integer(1034), new Decode1034Msg(this));
+		decodeMap.put(new Integer(1041), new Decode1041Msg());
+		decodeMap.put(new Integer(1042), new Decode1042Msg());
+		decodeMap.put(new Integer(63), new Decode1042Msg()); // BeiDou draft
+		decodeMap.put(new Integer(1044), new Decode1044Msg());
+		decodeMap.put(new Integer(1045), new Decode1045Msg());
+		decodeMap.put(new Integer(1046), new Decode1046Msg());
+		decodeMap.put(new Integer(1047), new Decode1047Msg());
+		decodeMap.put(new Integer(1029), new Decode1029Msg());
+		decodeMap.put(new Integer(1230), new Decode1230Msg());
+		decodeMap.put(new Integer(1013), new Decode1013Msg());
+		decodeMap.put(new Integer(1043), new Decode1043Msg());
+		
+		// SSR轨道/钟差改正消息 (1057-1068)
+		for (int i = 1057; i <= 1068; i++) {
+			decodeMap.put(new Integer(i), new DecodeSSRMsg(i));
+		}
+		
+		// MSM观测消息 - GPS (1071-1077)
+		for (int i = 1071; i <= 1077; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - GLONASS (1081-1087)
+		for (int i = 1081; i <= 1087; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - Galileo (1091-1097)
+		for (int i = 1091; i <= 1097; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - SBAS (1101-1107)
+		for (int i = 1101; i <= 1107; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - QZSS (1111-1117)
+		for (int i = 1111; i <= 1117; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - BeiDou (1121-1127)
+		for (int i = 1121; i <= 1127; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - Multi-GNSS (1131-1137)
+		for (int i = 1131; i <= 1137; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		
+		// SSR URA/时钟/轨道改正消息 (1240-1251)
+		for (int i = 1240; i <= 1251; i++) {
+			decodeMap.put(new Integer(i), new DecodeSSRMsg(i));
+		}
+		
+		// SSR电离层/对流层改正消息 (1258-1263)
+		for (int i = 1258; i <= 1263; i++) {
+			decodeMap.put(new Integer(i), new DecodeSSRMsg(i));
+		}
 	}
 	
 	public RTCM3Client(int startWeek) {
@@ -218,6 +277,65 @@ public class RTCM3Client implements Runnable, StreamResource, StreamEventProduce
 		decodeMap.put(new Integer(1007), new Decode1007Msg(this));
 		decodeMap.put(new Integer(1008), new Decode1008Msg(this));
 		decodeMap.put(new Integer(1012), new Decode1012Msg());
+		decodeMap.put(new Integer(1019), new Decode1019Msg());
+		decodeMap.put(new Integer(1020), new Decode1020Msg());
+		decodeMap.put(new Integer(1033), new Decode1033Msg(this));
+		decodeMap.put(new Integer(1034), new Decode1034Msg(this));
+		decodeMap.put(new Integer(1041), new Decode1041Msg());
+		decodeMap.put(new Integer(1042), new Decode1042Msg());
+		decodeMap.put(new Integer(63), new Decode1042Msg()); // BeiDou draft
+		decodeMap.put(new Integer(1044), new Decode1044Msg());
+		decodeMap.put(new Integer(1045), new Decode1045Msg());
+		decodeMap.put(new Integer(1046), new Decode1046Msg());
+		decodeMap.put(new Integer(1047), new Decode1047Msg());
+		decodeMap.put(new Integer(1029), new Decode1029Msg());
+		decodeMap.put(new Integer(1230), new Decode1230Msg());
+		decodeMap.put(new Integer(1013), new Decode1013Msg());
+		decodeMap.put(new Integer(1043), new Decode1043Msg());
+		
+		// SSR轨道/钟差改正消息 (1057-1068)
+		for (int i = 1057; i <= 1068; i++) {
+			decodeMap.put(new Integer(i), new DecodeSSRMsg(i));
+		}
+		
+		// MSM观测消息 - GPS (1071-1077)
+		for (int i = 1071; i <= 1077; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - GLONASS (1081-1087)
+		for (int i = 1081; i <= 1087; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - Galileo (1091-1097)
+		for (int i = 1091; i <= 1097; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - SBAS (1101-1107)
+		for (int i = 1101; i <= 1107; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - QZSS (1111-1117)
+		for (int i = 1111; i <= 1117; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - BeiDou (1121-1127)
+		for (int i = 1121; i <= 1127; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		// MSM观测消息 - Multi-GNSS (1131-1137)
+		for (int i = 1131; i <= 1137; i++) {
+			decodeMap.put(new Integer(i), new DecodeMSMMsg(i));
+		}
+		
+		// SSR URA/时钟/轨道改正消息 (1240-1251)
+		for (int i = 1240; i <= 1251; i++) {
+			decodeMap.put(new Integer(i), new DecodeSSRMsg(i));
+		}
+		
+		// SSR电离层/对流层改正消息 (1258-1263)
+		for (int i = 1258; i <= 1263; i++) {
+			decodeMap.put(new Integer(i), new DecodeSSRMsg(i));
+		}
 	}
 
 	public ArrayList<String> getSources() throws IOException {
@@ -863,6 +981,8 @@ public class RTCM3Client implements Runnable, StreamResource, StreamEventProduce
 				}
 				if(o instanceof Observations){
 					addObservation((Observations) o);
+				} else if(o instanceof org.gogpsproject.ephemeris.EphGps){
+					addEphemeris((org.gogpsproject.ephemeris.EphGps) o);
 				}
 			}else{
 				//System.err.println("missing RTCM message parser "+msgtype);
@@ -900,6 +1020,14 @@ public class RTCM3Client implements Runnable, StreamResource, StreamEventProduce
 			for(StreamEventListener sel:streamEventListeners){
 				Observations oc = (Observations)o.clone();
 				sel.addObservations(oc);
+			}
+		}
+	}
+	
+	public void addEphemeris(org.gogpsproject.ephemeris.EphGps eph){
+		if(streamEventListeners!=null && eph!=null){
+			for(StreamEventListener sel:streamEventListeners){
+				sel.addEphemeris(eph);
 			}
 		}
 //		if(debug){

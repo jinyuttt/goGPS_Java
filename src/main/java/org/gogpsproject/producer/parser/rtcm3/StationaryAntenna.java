@@ -34,6 +34,14 @@ public class StationaryAntenna {
 	private int reserved2;
 	private double antennaRefPointZ; // antenna reference point ECEF-Y
 	private double antennaHeight;
+	
+	// Additional fields for RTCM3 1033
+	private String antennaDescriptor;
+	private int antennaSetupId;
+	private String antennaSerialNumber;
+	private String receiverType;
+	private String receiverFirmware;
+	private String receiverSerialNumber;
 
 
 	public double getAntennaRefPointX() {
@@ -157,6 +165,56 @@ public class StationaryAntenna {
 	 */
 	public double getAntennaHeight() {
 		return antennaHeight;
+	}
+
+	// Getters and setters for RTCM3 1033 fields
+	
+	public String getAntennaDescriptor() {
+		return antennaDescriptor;
+	}
+
+	public void setAntennaDescriptor(String antennaDescriptor) {
+		this.antennaDescriptor = antennaDescriptor;
+	}
+
+	public int getAntennaSetupId() {
+		return antennaSetupId;
+	}
+
+	public void setAntennaSetupId(int antennaSetupId) {
+		this.antennaSetupId = antennaSetupId;
+	}
+
+	public String getAntennaSerialNumber() {
+		return antennaSerialNumber;
+	}
+
+	public void setAntennaSerialNumber(String antennaSerialNumber) {
+		this.antennaSerialNumber = antennaSerialNumber;
+	}
+
+	public String getReceiverType() {
+		return receiverType;
+	}
+
+	public void setReceiverType(String receiverType) {
+		this.receiverType = receiverType;
+	}
+
+	public String getReceiverFirmware() {
+		return receiverFirmware;
+	}
+
+	public void setReceiverFirmware(String receiverFirmware) {
+		this.receiverFirmware = receiverFirmware;
+	}
+
+	public String getReceiverSerialNumber() {
+		return receiverSerialNumber;
+	}
+
+	public void setReceiverSerialNumber(String receiverSerialNumber) {
+		this.receiverSerialNumber = receiverSerialNumber;
 	}
 
 }

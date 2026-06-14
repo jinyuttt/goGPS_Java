@@ -35,74 +35,15 @@ import org.gogpsproject.producer.Streamable;
  * @author Eugenio Realini, Cryms.com, Daisuke Yoshida 
  */
 
-public class EphQzs implements Streamable {
+public class EphQzs extends EphGps {
 	private final static int STREAM_V = 1;
 
-	private Time refTime; /* Reference time of the dataset */
-	private char satType; /* Satellite Type */
-	private int satID; /* Satellite ID number */
-	private int week; /* GPS week number */
-
+	// QZSS specific parameters (inherits most from EphGps)
 	private int L2Code; /* Code on L2 */
 	private int L2Flag; /* L2 P data flag */
-
-	private int svAccur; /* SV accuracy (URA index) */
-	private int svHealth; /* SV health */
-
-	private int iode; /* Issue of data (ephemeris) */
-	private int iodc; /* Issue of data (clock) */
-
-	private double toc; /* clock data reference time */
-	private double toe; /* ephemeris reference time */
-	private double tom; /* transmission time of message */
-
-	/* satellite clock parameters */
-	private double af0;
-	private double af1;
-	private double af2;
-	private double tgd;
-
-	/* satellite orbital parameters */
-	private double rootA; /* Square root of the semimajor axis */
-	private double e; /* Eccentricity */
-	private double i0; /* Inclination angle at reference time */
-	private double iDot; /* Rate of inclination angle */
-	private double omega; /* Argument of perigee */
-	private double omega0; /*
-					 * Longitude of ascending node of orbit plane at beginning
-					 * of week
-					 */
-	private double omegaDot; /* Rate of right ascension */
-	private double M0; /* Mean anomaly at reference time */
-	private double deltaN; /* Mean motion difference from computed value */
-	private double crc, crs, cuc, cus, cic, cis; /*
-										 * Amplitude of second-order harmonic
-										 * perturbations
-										 */
-	private double fitInt; /* Fit interval */
 	
 	/* for GLONASS data */
-	private float tow;
-	
-	private float tauN;
-	private float gammaN;
-	private double tk;
-
-	private double X;
-	private double Xv;
-	private double Xa;
-	private double Bn;
-	
-	private double Y;
-	private double Yv;
-	private double Ya;
-	private double freq_num;
-	private double tb;
-
-	private double Z;
-	private double Zv;
-	private double Za;
-	private double En;
+	// These fields are inherited from EphGps
 
 	public EphQzs(){
 		
@@ -115,49 +56,49 @@ public class EphQzs implements Streamable {
 	 * @return the refTime
 	 */
 	public Time getRefTime() {
-		return refTime;
+		return super.getRefTime();
 	}
 	/**
 	 * @param refTime the refTime to set
 	 */
 	public void setRefTime(Time refTime) {
-		this.refTime = refTime;
+		super.setRefTime(refTime);
 	}
 	/**
 	 * @return the satType
 	 */
 	public char getSatType() {
-		return satType;
+		return super.getSatType();
 	}
 	/**
 	 * @param satType the satType to set
 	 */
 	public void setSatType(char satType) {
-		this.satType = satType;
+		super.setSatType(satType);
 	}
 	/**
 	 * @return the satID
 	 */
 	public int getSatID() {
-		return satID;
+		return super.getSatID();
 	}
 	/**
 	 * @param satID the satID to set
 	 */
 	public void setSatID(int satID) {
-		this.satID = satID;
+		super.setSatID(satID);
 	}
 	/**
 	 * @return the week
 	 */
 	public int getWeek() {
-		return week;
+		return super.getWeek();
 	}
 	/**
 	 * @param week the week to set
 	 */
 	public void setWeek(int week) {
-		this.week = week;
+		super.setWeek(week);
 	}
 	/**
 	 * @return the l2Code
@@ -187,455 +128,448 @@ public class EphQzs implements Streamable {
 	 * @return the svAccur
 	 */
 	public int getSvAccur() {
-		return svAccur;
+		return super.getSvAccur();
 	}
 	/**
 	 * @param svAccur the svAccur to set
 	 */
 	public void setSvAccur(int svAccur) {
-		this.svAccur = svAccur;
+		super.setSvAccur(svAccur);
 	}
 	/**
 	 * @return the svHealth
 	 */
 	public int getSvHealth() {
-		return svHealth;
+		return super.getSvHealth();
 	}
 	/**
 	 * @param svHealth the svHealth to set
 	 */
 	public void setSvHealth(int svHealth) {
-		this.svHealth = svHealth;
+		super.setSvHealth(svHealth);
 	}
 	/**
 	 * @return the iode
 	 */
 	public int getIode() {
-		return iode;
+		return super.getIode();
 	}
 	/**
 	 * @param iode the iode to set
 	 */
 	public void setIode(int iode) {
-		this.iode = iode;
+		super.setIode(iode);
 	}
 	/**
 	 * @return the iodc
 	 */
 	public int getIodc() {
-		return iodc;
+		return super.getIodc();
 	}
 	/**
 	 * @param iodc the iodc to set
 	 */
 	public void setIodc(int iodc) {
-		this.iodc = iodc;
+		super.setIodc(iodc);
 	}
 	/**
 	 * @return the toc
 	 */
 	public double getToc() {
-		return toc;
+		return super.getToc();
 	}
 	/**
 	 * @param toc the toc to set
 	 */
 	public void setToc(double toc) {
-		this.toc = toc;
+		super.setToc(toc);
 	}
 	/**
 	 * @return the toe
 	 */
 	public double getToe() {
-		return toe;
+		return super.getToe();
 	}
 	/**
 	 * @param toe the toe to set
 	 */
 	public void setToe(double toe) {
-		this.toe = toe;
+		super.setToe(toe);
 	}
 	/**
 	 * @return the tom
 	 */
 	public double getTom() {
-		return tom;
+		return super.getTom();
 	}
 	/**
 	 * @param tom the tom to set
 	 */
 	public void setTom(double tom) {
-		this.tom = tom;
+		super.setTom(tom);
 	}
 	/**
 	 * @return the af0
 	 */
 	public double getAf0() {
-		return af0;
+		return super.getAf0();
 	}
 	/**
 	 * @param af0 the af0 to set
 	 */
 	public void setAf0(double af0) {
-		this.af0 = af0;
+		super.setAf0(af0);
 	}
 	/**
 	 * @return the af1
 	 */
 	public double getAf1() {
-		return af1;
+		return super.getAf1();
 	}
 	/**
 	 * @param af1 the af1 to set
 	 */
 	public void setAf1(double af1) {
-		this.af1 = af1;
+		super.setAf1(af1);
 	}
 	/**
 	 * @return the af2
 	 */
 	public double getAf2() {
-		return af2;
+		return super.getAf2();
 	}
 	/**
 	 * @param af2 the af2 to set
 	 */
 	public void setAf2(double af2) {
-		this.af2 = af2;
+		super.setAf2(af2);
 	}
 	/**
 	 * @return the tgd
 	 */
 	public double getTgd() {
-		return tgd;
+		return super.getTgd();
 	}
 	/**
 	 * @param tgd the tgd to set
 	 */
 	public void setTgd(double tgd) {
-		this.tgd = tgd;
+		super.setTgd(tgd);
 	}
 	/**
 	 * @return the rootA
 	 */
 	public double getRootA() {
-		return rootA;
+		return super.getRootA();
 	}
 	/**
 	 * @param rootA the rootA to set
 	 */
 	public void setRootA(double rootA) {
-		this.rootA = rootA;
+		super.setRootA(rootA);
 	}
 	/**
 	 * @return the e
 	 */
 	public double getE() {
-		return e;
+		return super.getE();
 	}
 	/**
 	 * @param e the e to set
 	 */
 	public void setE(double e) {
-		this.e = e;
+		super.setE(e);
 	}
 	/**
 	 * @return the i0
 	 */
 	public double getI0() {
-		return i0;
+		return super.getI0();
 	}
 	/**
 	 * @param i0 the i0 to set
 	 */
 	public void setI0(double i0) {
-		this.i0 = i0;
+		super.setI0(i0);
 	}
 	/**
 	 * @return the iDot
 	 */
 	public double getiDot() {
-		return iDot;
+		return super.getiDot();
 	}
 	/**
 	 * @param iDot the iDot to set
 	 */
 	public void setiDot(double iDot) {
-		this.iDot = iDot;
+		super.setiDot(iDot);
 	}
 	/**
 	 * @return the omega
 	 */
 	public double getOmega() {
-		return omega;
+		return super.getOmega();
 	}
 	/**
 	 * @param omega the omega to set
 	 */
 	public void setOmega(double omega) {
-		this.omega = omega;
+		super.setOmega(omega);
 	}
 	/**
 	 * @return the omega0
 	 */
 	public double getOmega0() {
-		return omega0;
+		return super.getOmega0();
 	}
 	/**
 	 * @param omega0 the omega0 to set
 	 */
 	public void setOmega0(double omega0) {
-		this.omega0 = omega0;
+		super.setOmega0(omega0);
 	}
 	/**
 	 * @return the omegaDot
 	 */
 	public double getOmegaDot() {
-		return omegaDot;
+		return super.getOmegaDot();
 	}
 	/**
 	 * @param omegaDot the omegaDot to set
 	 */
 	public void setOmegaDot(double omegaDot) {
-		this.omegaDot = omegaDot;
+		super.setOmegaDot(omegaDot);
 	}
 	/**
 	 * @return the m0
 	 */
 	public double getM0() {
-		return M0;
+		return super.getM0();
 	}
 	/**
 	 * @param m0 the m0 to set
 	 */
 	public void setM0(double m0) {
-		M0 = m0;
+		super.setM0(m0);
 	}
 	/**
 	 * @return the deltaN
 	 */
 	public double getDeltaN() {
-		return deltaN;
+		return super.getDeltaN();
 	}
 	/**
 	 * @param deltaN the deltaN to set
 	 */
 	public void setDeltaN(double deltaN) {
-		this.deltaN = deltaN;
+		super.setDeltaN(deltaN);
 	}
 	/**
 	 * @return the crc
 	 */
 	public double getCrc() {
-		return crc;
+		return super.getCrc();
 	}
 	/**
 	 * @param crc the crc to set
 	 */
 	public void setCrc(double crc) {
-		this.crc = crc;
+		super.setCrc(crc);
 	}
 	/**
 	 * @return the crs
 	 */
 	public double getCrs() {
-		return crs;
+		return super.getCrs();
 	}
 	/**
 	 * @param crs the crs to set
 	 */
 	public void setCrs(double crs) {
-		this.crs = crs;
+		super.setCrs(crs);
 	}
 	/**
 	 * @return the cuc
 	 */
 	public double getCuc() {
-		return cuc;
+		return super.getCuc();
 	}
 	/**
 	 * @param cuc the cuc to set
 	 */
 	public void setCuc(double cuc) {
-		this.cuc = cuc;
+		super.setCuc(cuc);
 	}
 	/**
 	 * @return the cus
 	 */
 	public double getCus() {
-		return cus;
+		return super.getCus();
 	}
 	/**
 	 * @param cus the cus to set
 	 */
 	public void setCus(double cus) {
-		this.cus = cus;
+		super.setCus(cus);
 	}
 	/**
 	 * @return the cic
 	 */
 	public double getCic() {
-		return cic;
+		return super.getCic();
 	}
 	/**
 	 * @param cic the cic to set
 	 */
 	public void setCic(double cic) {
-		this.cic = cic;
+		super.setCic(cic);
 	}
 	/**
 	 * @return the cis
 	 */
 	public double getCis() {
-		return cis;
+		return super.getCis();
 	}
 	/**
 	 * @param cis the cis to set
 	 */
 	public void setCis(double cis) {
-		this.cis = cis;
+		super.setCis(cis);
 	}
 	/**
 	 * @return the fitInt
 	 */
-	public double getFitInt() {
-		return fitInt;
+	public long getFitInt() {
+		return super.getFitInt();
 	}
 	/**
 	 * @param fitInt the fitInt to set
 	 */
-	public void setFitInt(double fitInt) {
-		this.fitInt = fitInt;
+	public void setFitInt(long fitInt) {
+		super.setFitInt(fitInt);
 	}
 	
 	
 	/* for GLONASS data */
-	
+
 	public float getTow() {
-		return tow;
+		return super.getTow();
 	}
 	public void setTow(float tow) {
-		this.tow = tow;
+		super.setTow(tow);
 	}
-	public float getTauN() {
-		return tauN;
+	public double getTauN() {
+		return super.getTauN();
 	}
-	public void setTauN(float tauN) {
-		this.tauN = tauN;
+	public void setTauN(double tauN) {
+		super.setTauN(tauN);
 	}
-	
-	public float getGammaN() {
-		return gammaN;
+
+	public double getGammaN() {
+		return super.getGammaN();
 	}
-	public void setGammaN(float gammaN) {
-		this.gammaN = gammaN;
+	public void setGammaN(double gammaN) {
+		super.setGammaN(gammaN);
 	}
-	
+
 	public double gettk() {
-		return tk;
+		return super.gettk();
 	}
 	public void settk(double tk) {
-		this.tk = tk;
+		super.settk(tk);
 	}
-	
+
 	public double getX() {
-		return X;
+		return super.getX();
 	}
 	public void setX(double X) {
-		this.X = X;
+		super.setX(X);
 	}
-	
+
 	public double getXv() {
-		return Xv;
+		return super.getXv();
 	}
 	public void setXv(double Xv) {
-		this.Xv = Xv;
+		super.setXv(Xv);
 	}
-	
+
 	public double getXa() {
-		return Xa;
+		return super.getXa();
 	}
 	public void setXa(double Xa) {
-		this.Xa = Xa;
+		super.setXa(Xa);
 	}
-	
+
 	public double getBn() {
-		return Bn;
+		return super.getBn();
 	}
 	public void setBn(double Bn) {
-		this.Bn = Bn;
+		super.setBn(Bn);
 	}
-	
+
 	public double getY() {
-		return Y;
+		return super.getY();
 	}
 	public void setY(double Y) {
-		this.Y = Y;
+		super.setY(Y);
 	}
-	
+
 	public double getYv() {
-		return Yv;
+		return super.getYv();
 	}
 	public void setYv(double Yv) {
-		this.Yv = Yv;
+		super.setYv(Yv);
 	}
-	
+
 	public double getYa() {
-		return Ya;
+		return super.getYa();
 	}
 	public void setYa(double Ya) {
-		this.Ya = Ya;
+		super.setYa(Ya);
 	}
-	
-	public double getfreq_num() {
-		return freq_num;
+
+	public int getfreq_num() {
+		return super.getfreq_num();
 	}
-	public void setfreq_num(double freq_num) {
-		this.freq_num = freq_num;
+	public void setfreq_num(int freq_num) {
+		super.setfreq_num(freq_num);
 	}
-	
+
 	public double gettb() {
-		return tb;
+		return super.gettb();
 	}
 	public void settb(double tb) {
-		this.tb = tb;
+		super.settb(tb);
 	}
-	
+
 	public double getZ() {
-		return Z;
+		return super.getZ();
 	}
 	public void setZ(double Z) {
-		this.Z = Z;
+		super.setZ(Z);
 	}
-	
+
 	public double getZv() {
-		return Zv;
+		return super.getZv();
 	}
 	public void setZv(double Zv) {
-		this.Zv = Zv;
+		super.setZv(Zv);
 	}
-	
+
 	public double getZa() {
-		return Za;
+		return super.getZa();
 	}
 	public void setZa(double Za) {
-		this.Za = Za;
+		super.setZa(Za);
 	}
-	
+
 	public double getEn() {
-		return En;
+		return super.getEn();
 	}
 	public void setEn(double En) {
-		this.En = En;
+		super.setEn(En);
 	}
-	
-//	public long getEn() {
-//		return En;
-//	}
-//	public void setEn(long En) {
-//		this.En = En;
-//	}
-	
+
 	
 	/* (non-Javadoc)
 	 * @see org.gogpsproject.Streamable#write(java.io.DataOutputStream)
@@ -646,46 +580,46 @@ public class EphQzs implements Streamable {
 		dos.writeUTF(MESSAGE_EPHEMERIS); // 5
 		dos.writeInt(STREAM_V); size+=4; // 4
 
-		dos.writeLong(refTime==null?-1:refTime.getMsec());  size +=8;
-		dos.write(satID);  size +=1;
-		dos.writeInt(week); size +=4;
+		dos.writeLong(getRefTime()==null?-1:getRefTime().getMsec());  size +=8;
+		dos.write(getSatID());  size +=1;
+		dos.writeInt(getWeek()); size +=4;
 
 		dos.writeInt(L2Code); size +=4;
 		dos.writeInt(L2Flag); size +=4;
 
-		dos.writeInt(svAccur); size +=4;
-		dos.writeInt(svHealth); size +=4;
+		dos.writeInt(getSvAccur()); size +=4;
+		dos.writeInt(getSvHealth()); size +=4;
 
-		dos.writeInt(iode); size +=4;
-		dos.writeInt(iodc); size +=4;
+		dos.writeInt(getIode()); size +=4;
+		dos.writeInt(getIodc()); size +=4;
 
-		dos.writeDouble(toc); size +=8;
-		dos.writeDouble(toe); size +=8;
+		dos.writeDouble(getToc()); size +=8;
+		dos.writeDouble(getToe()); size +=8;
 
-		dos.writeDouble(af0); size +=8;
-		dos.writeDouble(af1); size +=8;
-		dos.writeDouble(af2); size +=8;
-		dos.writeDouble(tgd); size +=8;
+		dos.writeDouble(getAf0()); size +=8;
+		dos.writeDouble(getAf1()); size +=8;
+		dos.writeDouble(getAf2()); size +=8;
+		dos.writeDouble(getTgd()); size +=8;
 
 
-		dos.writeDouble(rootA); size +=8;
-		dos.writeDouble(e); size +=8;
-		dos.writeDouble(i0); size +=8;
-		dos.writeDouble(iDot); size +=8;
-		dos.writeDouble(omega); size +=8;
-		dos.writeDouble(omega0); size +=8;
+		dos.writeDouble(getRootA()); size +=8;
+		dos.writeDouble(getE()); size +=8;
+		dos.writeDouble(getI0()); size +=8;
+		dos.writeDouble(getiDot()); size +=8;
+		dos.writeDouble(getOmega()); size +=8;
+		dos.writeDouble(getOmega0()); size +=8;
 
-		dos.writeDouble(omegaDot); size +=8;
-		dos.writeDouble(M0); size +=8;
-		dos.writeDouble(deltaN); size +=8;
-		dos.writeDouble(crc); size +=8;
-		dos.writeDouble(crs); size +=8;
-		dos.writeDouble(cuc); size +=8;
-		dos.writeDouble(cus); size +=8;
-		dos.writeDouble(cic); size +=8;
-		dos.writeDouble(cis); size +=8;
+		dos.writeDouble(getOmegaDot()); size +=8;
+		dos.writeDouble(getM0()); size +=8;
+		dos.writeDouble(getDeltaN()); size +=8;
+		dos.writeDouble(getCrc()); size +=8;
+		dos.writeDouble(getCrs()); size +=8;
+		dos.writeDouble(getCuc()); size +=8;
+		dos.writeDouble(getCus()); size +=8;
+		dos.writeDouble(getCic()); size +=8;
+		dos.writeDouble(getCis()); size +=8;
 
-		dos.writeDouble(fitInt); size +=8;
+		dos.writeLong(getFitInt()); size +=8;
 
 		return size;
 	}
@@ -699,37 +633,37 @@ public class EphQzs implements Streamable {
 
 		if(v==1){
 			long l = dai.readLong();
-			refTime = new Time(l>0?l:System.currentTimeMillis());
-			satID = dai.read();
-			week = dai.readInt();
+			setRefTime(new Time(l>0?l:System.currentTimeMillis()));
+			setSatID(dai.read());
+			setWeek(dai.readInt());
 			L2Code = dai.readInt();
 			L2Flag = dai.readInt();
-			svAccur = dai.readInt();
-			svHealth = dai.readInt();
-			iode = dai.readInt();
-			iodc = dai.readInt();
-			toc = dai.readDouble();
-			toe = dai.readDouble();
-			af0 = dai.readDouble();
-			af1 = dai.readDouble();
-			af2 = dai.readDouble();
-			tgd = dai.readDouble();
-			rootA = dai.readDouble();
-			e = dai.readDouble();
-			i0 = dai.readDouble();
-			iDot = dai.readDouble();
-			omega = dai.readDouble();
-			omega0 = dai.readDouble();
-			omegaDot = dai.readDouble();
-			M0 = dai.readDouble();
-			deltaN = dai.readDouble();
-			crc = dai.readDouble();
-			crs = dai.readDouble();
-			cuc = dai.readDouble();
-			cus = dai.readDouble();
-			cic = dai.readDouble();
-			cis = dai.readDouble();
-			fitInt = dai.readDouble();
+			setSvAccur(dai.readInt());
+			setSvHealth(dai.readInt());
+			setIode(dai.readInt());
+			setIodc(dai.readInt());
+			setToc(dai.readDouble());
+			setToe(dai.readDouble());
+			setAf0(dai.readDouble());
+			setAf1(dai.readDouble());
+			setAf2(dai.readDouble());
+			setTgd(dai.readDouble());
+			setRootA(dai.readDouble());
+			setE(dai.readDouble());
+			setI0(dai.readDouble());
+			setiDot(dai.readDouble());
+			setOmega(dai.readDouble());
+			setOmega0(dai.readDouble());
+			setOmegaDot(dai.readDouble());
+			setM0(dai.readDouble());
+			setDeltaN(dai.readDouble());
+			setCrc(dai.readDouble());
+			setCrs(dai.readDouble());
+			setCuc(dai.readDouble());
+			setCus(dai.readDouble());
+			setCic(dai.readDouble());
+			setCis(dai.readDouble());
+			setFitInt(dai.readLong());
 		}else{
 			throw new IOException("Unknown format version:"+v);
 		}

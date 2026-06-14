@@ -84,8 +84,8 @@ public class EphGps implements Streamable {
 	/* for GLONASS data */
 	private float tow;
 
-	private float tauN;
-	private float gammaN;
+	private double tauN;
+	private double gammaN;
 	private double tk;
 
 	private double X;
@@ -514,17 +514,24 @@ public class EphGps implements Streamable {
 
 	/* for GLONASS data */
 
-	public float getTauN() {
+	public float getTow() {
+		return tow;
+	}
+	public void setTow(float tow) {
+		this.tow = tow;
+	}
+
+	public double getTauN() {
 		return tauN;
 	}
-	public void setTauN(float tauN) {
+	public void setTauN(double tauN) {
 		this.tauN = tauN;
 	}
 
-	public float getGammaN() {
+	public double getGammaN() {
 		return gammaN;
 	}
-	public void setGammaN(float gammaN) {
+	public void setGammaN(double gammaN) {
 		this.gammaN = gammaN;
 	}
 
@@ -682,7 +689,7 @@ public class EphGps implements Streamable {
 		dos.writeDouble(cic); size +=8;
 		dos.writeDouble(cis); size +=8;
 
-		dos.writeDouble(fitInt); size +=8;
+		dos.writeLong(fitInt); size +=8;
 
 		return size;
 	}

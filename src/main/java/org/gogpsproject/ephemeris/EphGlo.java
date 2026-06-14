@@ -46,8 +46,8 @@ public class EphGlo implements Streamable {
 	private double tow;
 	private double toe; /* ephemeris reference time */
 	
-	private float tauN;
-	private float gammaN;
+	private double tauN;
+	private double gammaN;
 	private double tk;
 
 	private double X;
@@ -65,6 +65,19 @@ public class EphGlo implements Streamable {
 	private double Zv;
 	private double Za;
 	private double En;
+
+	private int svHealth;
+	private int strNum;
+	private double posX;
+	private double posY;
+	private double posZ;
+	private double velX;
+	private double velY;
+	private double velZ;
+	private double accX;
+	private double accY;
+	private double accZ;
+	private int ageOfData;
 
 
 	public EphGlo(){
@@ -160,17 +173,17 @@ public class EphGlo implements Streamable {
 	}
 	
 	
-	public float getTauN() {
+	public double getTauN() {
 		return tauN;
 	}
-	public void setTauN(float tauN) {
+	public void setTauN(double tauN) {
 		this.tauN = tauN;
 	}
 	
-	public float getGammaN() {
+	public double getGammaN() {
 		return gammaN;
 	}
-	public void setGammaN(float gammaN) {
+	public void setGammaN(double gammaN) {
 		this.gammaN = gammaN;
 	}
 	
@@ -236,6 +249,9 @@ public class EphGlo implements Streamable {
 	public void setfreq_num(double freq_num) {
 		this.freq_num = freq_num;
 	}
+	public void setFreqNum(int freqNum) {
+		this.freq_num = freqNum;
+	}
 	
 	public double gettb() {
 		return tb;
@@ -278,6 +294,90 @@ public class EphGlo implements Streamable {
 //	public void setEn(long En) {
 //		this.En = En;
 //	}
+	
+	public int getSvHealth() {
+		return svHealth;
+	}
+	public void setSvHealth(int svHealth) {
+		this.svHealth = svHealth;
+	}
+	
+	public int getStrNum() {
+		return strNum;
+	}
+	public void setStrNum(int strNum) {
+		this.strNum = strNum;
+	}
+	
+	public double getPosX() {
+		return posX;
+	}
+	public void setPosX(double posX) {
+		this.posX = posX;
+	}
+	
+	public double getPosY() {
+		return posY;
+	}
+	public void setPosY(double posY) {
+		this.posY = posY;
+	}
+	
+	public double getPosZ() {
+		return posZ;
+	}
+	public void setPosZ(double posZ) {
+		this.posZ = posZ;
+	}
+	
+	public double getVelX() {
+		return velX;
+	}
+	public void setVelX(double velX) {
+		this.velX = velX;
+	}
+	
+	public double getVelY() {
+		return velY;
+	}
+	public void setVelY(double velY) {
+		this.velY = velY;
+	}
+	
+	public double getVelZ() {
+		return velZ;
+	}
+	public void setVelZ(double velZ) {
+		this.velZ = velZ;
+	}
+	
+	public double getAccX() {
+		return accX;
+	}
+	public void setAccX(double accX) {
+		this.accX = accX;
+	}
+	
+	public double getAccY() {
+		return accY;
+	}
+	public void setAccY(double accY) {
+		this.accY = accY;
+	}
+	
+	public double getAccZ() {
+		return accZ;
+	}
+	public void setAccZ(double accZ) {
+		this.accZ = accZ;
+	}
+	
+	public int getAgeOfData() {
+		return ageOfData;
+	}
+	public void setAgeOfData(int ageOfData) {
+		this.ageOfData = ageOfData;
+	}
 	
 	
 	/* (non-Javadoc)
