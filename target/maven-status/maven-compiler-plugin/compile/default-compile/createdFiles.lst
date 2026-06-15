@@ -1,0 +1,5 @@
+org\gogpsproject\RTCM3CsvExporter$1.class
+org\gogpsproject\ephemeris\EphemerisSystem.class
+org\gogpsproject\ephemeris\EphQzs.class
+org\gogpsproject\producer\parser\rinex\RinexNavigationParser.class
+org\gogpsproject\positioning\Core$1.class
