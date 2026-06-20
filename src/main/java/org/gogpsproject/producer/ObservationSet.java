@@ -45,6 +45,8 @@ public class ObservationSet implements Streamable {
 	private int satID;	/* Satellite number */
 	private char satType;	/* Satellite Type */
 
+	private boolean tgdApplied = false;	/* Flag to prevent repeated TGD correction */
+
 	/* Array of [L1,L2] */
 	private double[] codeC = {Double.NaN,Double.NaN};			/* C Coarse/Acquisition (C/A) code [m] */
 	private double[] codeP = {Double.NaN,Double.NaN};			/* P Code Pseudorange [m] */
@@ -134,11 +136,21 @@ public class ObservationSet implements Streamable {
 	public double getWavelength(int i) {
 		double frequency = 0;
 		switch (this.satType) {
-		case 'G': frequency = (i==0)?Constants.FL1:Constants.FL2;
-		case 'R': frequency = (i==0)?freqNum*Constants.FR1_delta+Constants.FR1_base:freqNum*Constants.FR2_delta+Constants.FR2_base;
-		case 'E': frequency = (i==0)?Constants.FE1:Constants.FE5a;
-		case 'C': frequency = (i==0)?Constants.FC2:Constants.FC5b;
-		case 'J': frequency = (i==0)?Constants.FJ1:Constants.FJ2;
+		case 'G':
+			frequency = (i==0)?Constants.FL1:Constants.FL2;
+			break;
+		case 'R':
+			frequency = (i==0)?freqNum*Constants.FR1_delta+Constants.FR1_base:freqNum*Constants.FR2_delta+Constants.FR2_base;
+			break;
+		case 'E':
+			frequency = (i==0)?Constants.FE1:Constants.FE5a;
+			break;
+		case 'C':
+			frequency = (i==0)?Constants.FC2:Constants.FC6;
+			break;
+		case 'J':
+			frequency = (i==0)?Constants.FJ1:Constants.FJ2;
+			break;
 		}
 		return Constants.SPEED_OF_LIGHT/frequency;
 	}
@@ -180,6 +192,14 @@ public class ObservationSet implements Streamable {
 	 */
 	public void setCodeP(int i, double p) {
 		codeP[i] = p;
+	}
+
+	public boolean isTgdApplied() {
+		return tgdApplied;
+	}
+
+	public void setTgdApplied(boolean tgdApplied) {
+		this.tgdApplied = tgdApplied;
 	}
 
 	/**

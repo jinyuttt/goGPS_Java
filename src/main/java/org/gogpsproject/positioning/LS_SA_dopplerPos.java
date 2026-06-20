@@ -12,6 +12,7 @@ import org.gogpsproject.positioning.RoverPosition.DopType;
 import org.gogpsproject.producer.NavigationProducer;
 import org.gogpsproject.producer.ObservationSet;
 import org.gogpsproject.producer.Observations;
+import org.gogpsproject.producer.parser.IonoGps;
 
 public class LS_SA_dopplerPos extends LS_SA_code {
 
@@ -43,6 +44,9 @@ public class LS_SA_dopplerPos extends LS_SA_code {
     // Allocate arrays to store receiver-satellite atmospheric corrections
     rover.satTropoCorr = new double[nObs];
     rover.satIonoCorr = new double[nObs];
+
+    // Allocate arrays to store receiver-satellite antenna corrections
+    rover.satAntennaCorr = new double[nObs];
 
     // Create a list for available satellites after cutoff
     sats.avail = new LinkedHashMap<>();
@@ -137,11 +141,36 @@ public class LS_SA_dopplerPos extends LS_SA_code {
       rover.topo[i] = new TopocentricCoordinates();
       rover.topo[i].computeTopocentric( rover, sats.pos[i]);
 
-      // Correct approximate pseudorange for troposphere
-      rover.satTropoCorr[i] = sats.computeTroposphereCorrection(rover.topo[i].getElevation(), rover.getGeodeticHeight());
+      // Correct approximate pseudorange for troposphere (RTKLIB-aligned)
+      rover.satTropoCorr[i] = Satellites.computeTroposphereCorrection(
+          Math.toRadians(rover.getGeodeticLatitude()),
+          rover.getGeodeticHeight(),
+          Math.toRadians(rover.topo[i].getElevation()));
 
-      // Correct approximate pseudorange for ionosphere
-      rover.satIonoCorr[i] = sats.computeIonosphereCorrection(navigation, rover, rover.topo[i].getAzimuth(), rover.topo[i].getElevation(), roverObs.getRefTime());
+      // Correct approximate pseudorange for ionosphere (RTKLIB-aligned)
+      IonoGps ionoGps = navigation.getIono(roverObs.getRefTime().getMsec());
+      double[] ionParams = (ionoGps != null)
+          ? new double[]{ionoGps.getAlpha(0), ionoGps.getAlpha(1), ionoGps.getAlpha(2), ionoGps.getAlpha(3),
+                         ionoGps.getBeta(0),  ionoGps.getBeta(1),  ionoGps.getBeta(2),  ionoGps.getBeta(3)}
+          : null;
+      rover.satIonoCorr[i] = Satellites.computeIonosphereCorrection(
+          roverObs.getRefTime().getGpsTime(),
+          ionParams,
+          Math.toRadians(rover.getGeodeticLatitude()),
+          Math.toRadians(rover.getGeodeticLongitude()),
+          Math.toRadians(rover.topo[i].getAzimuth()),
+          Math.toRadians(rover.topo[i].getElevation()));
+
+      // Correct approximate pseudorange for antenna phase center (RTKLIB-aligned)
+      double azRad = Math.toRadians(rover.topo[i].getAzimuth());
+      double elRad = Math.toRadians(rover.topo[i].getElevation());
+      double rcvAntCorr = Satellites.antennaCorrection(goGPS.getReceiverAntennaPcv(),
+          goGPS.getAntennaDelta(), azRad, elRad, 1, goGPS.getFreq());
+      double[] rs = {sats.pos[i].getX(), sats.pos[i].getY(), sats.pos[i].getZ()};
+      double[] rr = {rover.getX(), rover.getY(), rover.getZ()};
+      double satAntCorr = Satellites.satelliteAntennaCorrection(rs, rr,
+          goGPS.getSatelliteAntennaPcv(id), goGPS.getFreq());
+      rover.satAntennaCorr[i] = rcvAntCorr + satAntCorr;
 
       if( goGPS.isDebug()) System.out.print( String.format( " El:%4.1f ", rover.topo[i].getElevation() ));
 
@@ -539,4 +568,3 @@ public class LS_SA_dopplerPos extends LS_SA_code {
   }
   
 }
-

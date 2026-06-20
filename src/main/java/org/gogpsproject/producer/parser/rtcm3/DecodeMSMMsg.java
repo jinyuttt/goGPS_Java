@@ -29,25 +29,25 @@ import org.gogpsproject.util.Bits;
  */
 public class DecodeMSMMsg implements Decode {
 
-	private static final double RANGE_MS = 299792.458;  // 光速 * 0.001 米/毫秒
-	private static final double P2_10 = 1.0 / 1024.0;  // 2^-10
-	private static final double P2_20 = 1.0 / 1048576.0; // 2^-20
-	private static final double P2_29 = 1.0 / (1L << 29); // 2^-29
-	private static final double P2_30 = 1.0 / (1L << 30); // 2^-30
-	private static final double P2_31 = 1.0 / (1L << 31); // 2^-31
-	private static final double P2_34 = 1.0 / (1L << 34); // 2^-34
-	private static final double P2_43 = 1.0 / (1L << 43); // 2^-43
-	private static final double P2_48 = 1.0 / (1L << 48); // 2^-48
+	private static final double RANGE_MS = 299792.458;  // CLIGHT * 0.001 m/ms
+	private static final double P2_10 = 1.0 / 1024.0;       // 2^-10
+	private static final double P2_24 = 1.0 / 16777216.0;    // 2^-24
+	private static final double P2_29 = 1.0 / (1L << 29);    // 2^-29
+	private static final double P2_31 = 1.0 / (1L << 31);    // 2^-31
 
-	// MSM参数表: {roughBits, fineBits, cnrBits, phaseUnit}
-	private static final double[][] MSM_PARAMS = {
-		{8, 8, 6, 0.0001},    // MSM1 - 紧凑伪距
-		{8, 10, 6, 0.0001},   // MSM2 - 紧凑相位+伪距
-		{8, 15, 6, 0.0005},   // MSM3 - 紧凑+CNR
-		{8, 10, 6, 0.0001},   // MSM4 - 完整（最常用）
-		{8, 15, 6, 0.0005},   // MSM5 - 完整+相位变化率
-		{12, 15, 10, 0.0005}, // MSM6 - 高精度
-		{12, 22, 10, 0.0005}  // MSM7 - 高精度+相位变化率
+	// MSM参数表 (RTKLIB-aligned):
+	// {roughBits, finePRBits, finePhaseBits, cnrBits, lockBits, cnrUnit}
+	// finePRBits: 精细伪距位宽 (signed), finePhaseBits: 精细相位位宽 (signed)
+	// 精细伪距缩放: MSM4/5 → P2_24*RANGE_MS, MSM6/7 → P2_29*RANGE_MS
+	// 精细相位缩放: MSM4/5 → P2_29*RANGE_MS, MSM6/7 → P2_31*RANGE_MS
+	private static final int[][] MSM_PARAMS = {
+		{ 8,  8,  8,  6, 4, 100},  // MSM1
+		{ 8, 10, 10,  6, 4, 100},  // MSM2
+		{ 8, 15, 15,  6, 4, 100},  // MSM3
+		{ 8, 15, 22,  6, 4, 100},  // MSM4: finePR=15bit, finePhase=22bit
+		{ 8, 15, 22,  6, 4, 100},  // MSM5: finePR=15bit, finePhase=22bit
+		{12, 20, 24, 10,10,  16},  // MSM6: finePR=20bit, finePhase=24bit
+		{12, 20, 24, 10,10,  16}   // MSM7: finePR=20bit, finePhase=24bit
 	};
 
 	private int msgType;
@@ -80,11 +80,22 @@ public class DecodeMSMMsg implements Decode {
 		}
 
 		int i = 12; // 跳过消息类型
-		double[] params = MSM_PARAMS[msmLevel - 1];
-		int roughBits = (int) params[0];
-		int fineBits = (int) params[1];
-		int cnrBits = (int) params[2];
-		double phaseScale = params[3];
+		int[] params = MSM_PARAMS[msmLevel - 1];
+		int roughBits = params[0];
+		int finePRBits = params[1];
+		int finePhaseBits = params[2];
+		int cnrBits = params[3];
+		int lockBits = params[4];
+		double cnrUnit = params[5] / 100.0; // 除以100恢复真实值 (1.0 or 0.0625)
+
+		// 精细值缩放因子 (RTKLIB-aligned)
+		boolean isHighRes = (msmLevel == 6 || msmLevel == 7);
+		double finePRScale = isHighRes ? P2_29 : P2_24;
+		double finePhaseScale = isHighRes ? P2_31 : P2_29;
+
+		// 精细值哨兵值 (最小有符号值 = -2^(bits-1))
+		long finePRSentinel = -(1L << (finePRBits - 1));
+		long finePhaseSentinel = -(1L << (finePhaseBits - 1));
 
 		try {
 			// ========== 消息头 ==========
@@ -93,15 +104,12 @@ public class DecodeMSMMsg implements Decode {
 			i += 12;
 
 			// Epoch Time: 30 bits, scale 0.001s
-			double tow = bitsToUInt(bits, i, 30) * 0.001;
-			// 调试：打印原始 tow 值
-			System.err.printf("[DEBUG DecodeMSM] 原始 tow=%f, satSys=%c%n", tow, getSatelliteSystem());
-			// 注意：RTCM3 MSM 消息中的 BeiDou 时间标签通常是 BDT 格式
-			// 需要转换为 GPST（加 14 秒）
+			long rawTowBits = bitsToUInt(bits, i, 30);
+			double tow = rawTowBits * 0.001;
+			double towGPST = tow;
 			if (getSatelliteSystem() == 'C') {
-				tow = tow + 14.0;
+				towGPST = tow + 14.0;
 			}
-			System.err.printf("[DEBUG DecodeMSM] 转换后 tow=%f%n", tow);
 			i += 30;
 
 			// Multiple Message: 1 bit
@@ -135,8 +143,6 @@ public class DecodeMSMMsg implements Decode {
 			}
 			i += 64;
 			int satCount = satellites.size();
-			System.err.printf("[DEBUG DecodeMSM] MSM类型=%d (level=%d), roughBits=%d, satCount=%d%n", 
-                msgType, msmLevel, roughBits, satCount);
 
 			// ========== 信号掩码 (32 bits) ==========
 			ArrayList<Integer> signals = new ArrayList<>();
@@ -162,10 +168,8 @@ public class DecodeMSMMsg implements Decode {
 
 			// ========== 粗糙范围 (roughRange) ==========
 			int[] roughRange = new int[satCount];
-			System.err.printf("[DEBUG DecodeMSM] 开始解码 roughRange, roughBits=%d, satCount=%d%n", roughBits, satCount);
 			for (int s = 0; s < satCount; s++) {
 				roughRange[s] = (int) bitsToUInt(bits, i, roughBits);
-				System.err.printf("[DEBUG DecodeMSM] roughRange[%d]=%d%n", s, roughRange[s]);
 				i += roughBits;
 			}
 
@@ -204,30 +208,29 @@ public class DecodeMSMMsg implements Decode {
 			double[][] cnr = new double[satCount][sigCount];
 			double[][] finePhaseRate = new double[satCount][sigCount];
 
-			// ========== 精细伪距 ==========
+			// ========== 精细伪距 (RTKLIB: getbits signed) ==========
 			for (int s = 0; s < satCount; s++) {
 				for (int sig = 0; sig < sigCount; sig++) {
 					int cellIdx = s * sigCount + sig;
 					if (cellMask[cellIdx]) {
-						fineRange[s][sig] = bitsSigned(bits, i, fineBits);
-						i += fineBits;
+						fineRange[s][sig] = bitsSigned(bits, i, finePRBits);
+						i += finePRBits;
 					}
 				}
 			}
 
-			// ========== 精细载波相位 ==========
+			// ========== 精细载波相位 (RTKLIB: getbits signed, 位宽与伪距不同!) ==========
 			for (int s = 0; s < satCount; s++) {
 				for (int sig = 0; sig < sigCount; sig++) {
 					int cellIdx = s * sigCount + sig;
 					if (cellMask[cellIdx]) {
-						finePhase[s][sig] = bitsSigned(bits, i, fineBits);
-						i += fineBits;
+						finePhase[s][sig] = bitsSigned(bits, i, finePhaseBits);
+						i += finePhaseBits;
 					}
 				}
 			}
 
 			// ========== 锁定时长 ==========
-			int lockBits = (msmLevel == 6 || msmLevel == 7) ? 10 : 4;
 			for (int s = 0; s < satCount; s++) {
 				for (int sig = 0; sig < sigCount; sig++) {
 					int cellIdx = s * sigCount + sig;
@@ -250,7 +253,6 @@ public class DecodeMSMMsg implements Decode {
 			}
 
 			// ========== CNR ==========
-			double cnrUnit = (msmLevel == 6 || msmLevel == 7) ? 0.0625 : 1.0;
 			for (int s = 0; s < satCount; s++) {
 				for (int sig = 0; sig < sigCount; sig++) {
 					int cellIdx = s * sigCount + sig;
@@ -274,70 +276,96 @@ public class DecodeMSMMsg implements Decode {
 				}
 			}
 
-			// ========== 生成观测值记录 ==========
-			Observations obs = new Observations(new Time(week, tow), stationId);
+			// ========== 生成观测值记录 (RTKLIB-aligned) ==========
+			Observations obs = new Observations(new Time(week, towGPST), stationId);
 			char satType = getSatelliteSystem();
-
-			// 根据MSM等级选择精细值缩放因子
-			double fineScale;
-			switch (msmLevel) {
-				case 1: fineScale = RANGE_MS / (1L << 8); break;
-				case 2: fineScale = RANGE_MS / (1L << 10); break;
-				case 3: fineScale = RANGE_MS / (1L << 15); break;
-				case 4: fineScale = RANGE_MS / (1L << 10); break;
-				case 5: fineScale = RANGE_MS / (1L << 15); break;
-				case 6: fineScale = RANGE_MS / (1L << 15); break;
-				case 7: fineScale = RANGE_MS / (1L << 22); break;
-				default: fineScale = RANGE_MS / (1L << 10); break;
-			}
 
 			for (int s = 0; s < satCount; s++) {
 				int satId = satellites.get(s);
-				
-				// 计算伪距
-				// 根据 RTCM3 MSM5 规范:
-				// - roughRange: 整数毫秒 (已经是毫秒，不需要 * 0.001)
-				// - fineRange: 2^-10 毫秒 (需要 * P2_10)
-				double roughRangeMs = roughRange[s]; // 粗糙值已经是毫秒
-				double fineRangeMs = fineRange[s][0] * P2_10; // 精细值转换为毫秒 (P2_10 = 2^-10)
-				double pseudorange = (roughRangeMs + fineRangeMs) * RANGE_MS;
-				System.err.printf("[DEBUG DecodeMSM] 卫星 %c%d: roughRange=%d, roughRangeMs=%.6f ms, fineRangeMs=%.6f ms, pseudorange=%.2f m (对应时间=%.6f ms)%n", 
-						satType, satId, roughRange[s], roughRangeMs, fineRangeMs, pseudorange, pseudorange / RANGE_MS);
 
-				// 创建观测集
+				// === RTKLIB-aligned 伪距计算 ===
+				// 公式: P = (roughRange + roughRangeFine * P2_10) * RANGE_MS + fineRange * finePRScale * RANGE_MS
+				// roughRange: 整数毫秒 (roughBits位, 无符号)
+				// roughRangeFine: 小数毫秒 (10位, 无符号), P2_10 = 2^-10
+				// fineRange: 精细伪距修正 (finePRBits位, 有符号), finePRScale = P2_24 or P2_29
+				double roughMs = roughRange[s];
+				double roughFineMs = roughRangeFine[s] * P2_10;
+				double roughRangeM = (roughMs + roughFineMs) * RANGE_MS;
+
 				ObservationSet os = new ObservationSet();
 				os.setSatType(satType);
 				os.setSatID(satId);
 
-				// 设置伪距
-				os.setCodeC(0, pseudorange);
-
-				// 设置载波相位 (MSM2及以上)
-				if (msmLevel >= 2) {
-					double phase = finePhase[s][0] * phaseScale; // 单位: 米
-					// 转换为周 (载波相位/波长)
-					double wavelength = getWavelength(satType, signals.get(0));
-					if (wavelength > 0) {
-						os.setPhaseCycles(0, phase / wavelength);
+				// Decode all available signals (up to 2 for dual-frequency L1+L2)
+				// Sort signals by wavelength: shorter wavelength (higher freq) → L1, longer → L2
+				int nSigDecode = Math.min(sigCount, 2);
+				int[] sigIdsSorted = new int[nSigDecode];
+				double[] sigWavelengths = new double[nSigDecode];
+				int[] sigOrigIdx = new int[nSigDecode]; // original index in fineRange/finePhase arrays
+				for (int sig = 0; sig < nSigDecode; sig++) {
+					sigIdsSorted[sig] = signals.get(sig);
+					sigWavelengths[sig] = getWavelength(satType, sigIdsSorted[sig]);
+					sigOrigIdx[sig] = sig;
+				}
+				// Sort by wavelength ascending (shortest → L1)
+				for (int ki = 0; ki < nSigDecode; ki++) {
+					for (int kj = ki + 1; kj < nSigDecode; kj++) {
+						if (sigWavelengths[ki] > sigWavelengths[kj]) {
+							double tmpW = sigWavelengths[ki]; sigWavelengths[ki] = sigWavelengths[kj]; sigWavelengths[kj] = tmpW;
+							int tmpId = sigIdsSorted[ki]; sigIdsSorted[ki] = sigIdsSorted[kj]; sigIdsSorted[kj] = tmpId;
+							int tmpOi = sigOrigIdx[ki]; sigOrigIdx[ki] = sigOrigIdx[kj]; sigOrigIdx[kj] = tmpOi;
+						}
 					}
 				}
 
-				// 设置CNR
-				os.setSignalStrength(0, (float) cnr[s][0]);
-
-				// 设置半周模糊度标志
-				os.setHalfCycleAmb(0, halfAmb[s][0] == 1);
-
-				// 设置LLI (Loss of Lock Indicator)
-				int lli = 0;
-				if (lockTime[s][0] == 0) {
-					lli |= 1; // LLI bit set
+				if (s == 0 && satType == 'C') {
+					// System.err.printf("[MSM decode] BDS sat=%d, sigCount=%d, sig[0]=%d(wl=%.4f), sig[1]=%s%n",
+					// 	satId, sigCount, sigIdsSorted.length > 0 ? sigIdsSorted[0] : -1,
+					// 	sigIdsSorted.length > 0 ? sigWavelengths[0] : 0.0,
+					// 	sigIdsSorted.length > 1 ? sigIdsSorted[1] + "(wl=" + String.format("%.4f", sigWavelengths[1]) + ")" : "N/A");
 				}
-				os.setLossLockInd(0, lli);
 
-				// 设置多普勒 (MSM5/7)
-				if (msmLevel == 5 || msmLevel == 7) {
-					os.setDoppler(0, (float) finePhaseRate[s][0]);
+				for (int si = 0; si < nSigDecode; si++) {
+					int signalId = sigIdsSorted[si];
+					int origIdx = sigOrigIdx[si];
+					int freqIdx = si; // 0=L1 (shorter wavelength), 1=L2 (longer wavelength)
+
+					// Pseudorange (RTKLIB: P = (roughRange + roughRangeFine*P2_10)*RANGE_MS + fineRange*finePRScale*RANGE_MS)
+					if (roughRange[s] != 255) {
+						long finePR = (long) fineRange[s][origIdx];
+						double finePRM = (finePR != finePRSentinel) ? finePR * finePRScale * RANGE_MS : 0;
+						double pseudorange = roughRangeM + finePRM;
+						os.setCodeC(freqIdx, pseudorange);
+					}
+
+					// Carrier phase (RTKLIB: L = (roughRangeM + finePhase*finePhaseScale*RANGE_MS) / wavelength)
+					if (msmLevel >= 2 && roughRange[s] != 255) {
+						long fineCP = (long) finePhase[s][origIdx];
+						double fineCPM = (fineCP != finePhaseSentinel) ? fineCP * finePhaseScale * RANGE_MS : 0;
+						double phaseM = roughRangeM + fineCPM;
+						double wavelength = getWavelength(satType, signalId);
+						if (wavelength > 0) {
+							os.setPhaseCycles(freqIdx, phaseM / wavelength);
+						}
+					}
+
+					// CNR
+					os.setSignalStrength(freqIdx, (float) cnr[s][origIdx]);
+
+					// Half-cycle ambiguity flag
+					os.setHalfCycleAmb(freqIdx, halfAmb[s][origIdx] == 1);
+
+					// LLI (Loss of Lock Indicator)
+					int lli = 0;
+					if (lockTime[s][origIdx] == 0) {
+						lli |= 1;
+					}
+					os.setLossLockInd(freqIdx, lli);
+
+					// Doppler (MSM5/7)
+					if (msmLevel == 5 || msmLevel == 7) {
+						os.setDoppler(freqIdx, (float) finePhaseRate[s][origIdx]);
+					}
 				}
 
 				obs.setGps(s, os);
@@ -356,29 +384,32 @@ public class DecodeMSMMsg implements Decode {
 	 */
 	private double getWavelength(char satType, int signalId) {
 		switch (satType) {
-			case 'G': // GPS L1
-				if (signalId == 1) return 0.1902936727984; // L1
-				if (signalId == 2) return 0.2442102136241; // L2
+			case 'G': // GPS
+				if (signalId == 1) return 0.1902936727984; // L1 (1575.42 MHz)
+				if (signalId == 2) return 0.2442102136241; // L2 (1227.60 MHz)
+				if (signalId == 5) return 0.2548282314958; // L5 (1176.45 MHz)
 				return 0.1902936727984;
-			case 'R': // GLONASS
-				if (signalId == 1) return 0.1902936727984; // L1
-				if (signalId == 2) return 0.2442102136241; // L2
+			case 'R': // GLONASS (frequency-dependent, using nominal values)
+				if (signalId == 1) return 0.1902936727984; // L1 (nominal)
+				if (signalId == 2) return 0.2442102136241; // L2 (nominal)
 				return 0.1902936727984;
 			case 'E': // Galileo
-				if (signalId == 1) return 0.1902936727984; // E1
-				if (signalId == 5) return 0.2515140450406; // E5a
-				if (signalId == 6) return 0.2550232057122; // E5b
-				if (signalId == 7) return 0.2530548706806; // E5a+E5b
+				if (signalId == 1) return 0.1902936727984; // E1 (1575.42 MHz)
+				if (signalId == 5) return 0.2548282314958; // E5a (1176.45 MHz)
+				if (signalId == 6) return 0.2483451365472; // E5b (1207.14 MHz)
+				if (signalId == 7) return 0.2515140450406; // E5 AltBOC (1191.795 MHz)
 				return 0.1902936727984;
 			case 'C': // BeiDou
-				if (signalId == 1) return 0.1902936727984; // B1
-				if (signalId == 2) return 0.2442102136241; // B2
-				if (signalId == 5) return 0.1936760860390; // B3
-				return 0.1902936727984;
+				if (signalId == 1) return 0.1920473045472; // B1I (1561.098 MHz)
+				if (signalId == 2) return 0.2483451365472; // B2I (1207.14 MHz)
+				if (signalId == 5) return 0.2363478644346; // B3I (1268.52 MHz)
+				if (signalId == 8) return 0.1902936727984; // B1C (1575.42 MHz)
+				if (signalId == 23) return 0.2548282314958; // B2a (1176.45 MHz)
+				return 0.1920473045472;
 			case 'J': // QZSS
-				if (signalId == 1) return 0.1902936727984; // L1
-				if (signalId == 2) return 0.2442102136241; // L2
-				if (signalId == 5) return 0.2515140450406; // L5
+				if (signalId == 1) return 0.1902936727984; // L1 (1575.42 MHz)
+				if (signalId == 2) return 0.2442102136241; // L2 (1227.60 MHz)
+				if (signalId == 5) return 0.2548282314958; // L5 (1176.45 MHz)
 				return 0.1902936727984;
 			default:
 				return 0.1902936727984;

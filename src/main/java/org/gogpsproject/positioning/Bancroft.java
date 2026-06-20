@@ -153,7 +153,7 @@ public class Bancroft extends Core {
         BBB = B.invert();
       }
 
-      e.set(1);
+      e.fill(1.0);
       for (int i = 0; i < dataB.length; i++) {
 
         alpha.set(i, 0, lorentzInnerProduct(B.extractMatrix(i, i+1, 0, 4), B

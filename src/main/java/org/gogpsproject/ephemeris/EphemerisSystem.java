@@ -25,9 +25,11 @@ import java.util.Arrays;
 import java.util.TimeZone;
 
 import org.gogpsproject.Constants;
+import org.gogpsproject.RtkLibConstants;
 import org.gogpsproject.positioning.SatellitePosition;
 import org.gogpsproject.positioning.Time;
 import org.gogpsproject.producer.Observations;
+import org.gogpsproject.producer.ObservationSet;
 import org.ejml.simple.SimpleMatrix; 
 
 /**
@@ -40,13 +42,7 @@ import org.ejml.simple.SimpleMatrix;
 
 public abstract class EphemerisSystem {
 
-	/**
-	 * @param time
-	 *            (GPS time in seconds)
-	 * @param satID
-	 * @param range
-	 * @param approxPos
-	 */
+	
 	
 //	double[] pos ;
 	
@@ -59,34 +55,66 @@ public abstract class EphemerisSystem {
 		
 //		char satType2 = eph.getSatType() ;
 		if(satType == 'C'){  // BeiDou
-			
-//					System.out.println("### BeiDou data");
-			
-					// Compute satellite clock error
+
+					// TGD is signal group delay, NOT part of satellite clock error
+					// Reference: BDS ICD. TGD only affects pseudorange observation, not clock/transmit time
+					double tgdCorrection = eph.getTgd() * Constants.SPEED_OF_LIGHT; // seconds -> meters
+
+					// Persist TGD correction to the observation object so that all downstream
+					// computations (satAppRange, double-difference, LS) use corrected pseudorange
+					// IMPORTANT: TGD must be applied only ONCE per observation per epoch
+					ObservationSet os = obs.getSatByIDType(satID, satType);
+					double correctedPR;
+					if (!os.isTgdApplied()) {
+						correctedPR = obsPseudorange - tgdCorrection;
+						if (os.isPseudorangeP(0)) {
+							os.setCodeP(0, correctedPR);
+						} else {
+							os.setCodeC(0, correctedPR);
+						}
+						os.setTgdApplied(true);
+					} else {
+						correctedPR = obsPseudorange; // Already corrected, use as-is
+					}
+
+					// Compute satellite clock error using raw pseudorange (TGD NOT in clock error)
 					double satelliteClockError = computeSatelliteClockError(unixTime, eph, obsPseudorange);
-			
-					// Compute clock corrected transmission time
-					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange);
-			
-					// BDT (BeiDou Time) = GPST - 14 seconds
-					// BDT started at 2006-01-01 00:00:00 UTC, GPST started at 1980-01-06 00:00:00 UTC
-					// For the same physical instant, BDT has 14 seconds less elapsed than GPST
-					double tBDT = tGPS - 14.0;
-			
-					// Compute eccentric anomaly
-					double Ek = computeEccentricAnomalyBDS(tBDT, eph);
-			
-					// Semi-major axis
-					double A = eph.getRootA() * eph.getRootA();
-			
-					// Time from the ephemerides reference epoch
-					// tBDT 是 BDT (tGPS - 14)，toe 存储的是 GPS 秒（因为 week 已转换为 GPS week）
-					// 所以 tk = tGPS - toe = (tBDT + 14) - toe
-					double toeGPST = eph.getToe(); // toe 已经是 GPS 秒
-					double tk = checkGpsTime((tBDT + 14.0) - toeGPST);
-					System.err.printf("[DEBUG BDS SatPos] tBDT=%.1f, toe=%.1f (GPS秒), tk=%.1f%n", 
-							tBDT, toeGPST, tk);
-			
+					if (Double.isNaN(satelliteClockError)) {
+						return null; // Satellite unhealthy, exclude from solution
+					}
+
+					// Compute clock corrected transmission time (GPST) using TGD-corrected pseudorange
+					// Decode1042Msg already converted BDT toe/toc to GPST (+14s)
+					double transmitTimeGPST = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, correctedPR, satType);
+
+				// Compute eccentric anomaly using BDS constants (time is GPST)
+				Double EkObj = computeEccentricAnomalyBDS(transmitTimeGPST, eph);
+				if (EkObj == null) {
+					return null; // Satellite unhealthy, exclude from solution
+				}
+				double Ek = EkObj;
+
+				// Semi-major axis
+				double A = eph.getRootA() * eph.getRootA();
+
+				// Time from the ephemerides reference epoch
+				// Both transmitTime and eph.getToe() are in GPST
+				double tk = checkGpsTime(transmitTimeGPST - eph.getToe());
+
+				// 调试：打印北斗卫星位置计算关键参数（GEO卫星及BDS-3卫星）
+				if (false && (satID <= 5 || satID >= 59)) {
+					System.err.printf("[DEBUG BDS] PRN=%d, obsPseudorange=%.2f m, TGDcorr=%.2f m%n",
+							satID, obsPseudorange, tgdCorrection);
+					System.err.printf("[DEBUG BDS] satelliteClockError=%.6f s (%.2f m)%n",
+							satelliteClockError, satelliteClockError * Constants.SPEED_OF_LIGHT);
+					System.err.printf("[DEBUG BDS] transmitTimeGPST=%.2f, toeGPST=%.2f, tk=%.2f, Ek=%.6f rad%n",
+							transmitTimeGPST, eph.getToe(), tk, Ek);
+					System.err.printf("[DEBUG BDS] 星历参数: rootA=%.0f, e=%.8f, toe=%.2f, toc=%.2f%n",
+							eph.getRootA(), eph.getE(), eph.getToe(), eph.getToc());
+					System.err.printf("[DEBUG BDS] 钟参数: af0=%.12f, af1=%.12f, af2=%.12f, tgd=%.12f%n",
+							eph.getAf0(), eph.getAf1(), eph.getAf2(), eph.getTgd());
+				}
+
 					// Position computation using BDS constants
 					double fk = Math.atan2(Math.sqrt(1 - Math.pow(eph.getE(), 2))
 							* Math.sin(Ek), Math.cos(Ek) - eph.getE());
@@ -98,31 +126,47 @@ public abstract class EphemerisSystem {
 							* Math.cos(2 * phi) + eph.getCrs() * Math.sin(2 * phi);
 					double ik = eph.getI0() + eph.getiDot() * tk + eph.getCic() * Math.cos(2 * phi)
 							+ eph.getCis() * Math.sin(2 * phi);
-					double Omega = eph.getOmega0()
-							+ (eph.getOmegaDot() - Constants.OMEGAE_DOT_BDS) * tk
-							- Constants.OMEGAE_DOT_BDS * eph.getToe();
-					Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
+
 					double x1 = Math.cos(u) * r;
 					double y1 = Math.sin(u) * r;
-			
-					// Fill in the satellite position matrix
-					SatellitePosition sp = new SatellitePosition(unixTime,satID, satType, x1 * Math.cos(Omega) - y1 * Math.cos(ik) * Math.sin(Omega),
-							x1 * Math.sin(Omega) + y1 * Math.cos(ik) * Math.cos(Omega),
-							y1 * Math.sin(ik));
+
+					SatellitePosition sp;
+
+					// BDS GEO satellites: PRN 1-5 (BDS-2), PRN 59-63 (BDS-3)
+					// Reference: BDS-SIS-ICD-B1I-3.0, RTKLIB ephemeris.c eph2pos()
+					// Only Omega formula differs from non-GEO; ECEF conversion is identical
+					if (satID <= 5 || satID >= 59) {
+						// GEO: Ω_k = Ω₀ + Ω̇ * t_k - ω_e * t_oe
+						double Omega = eph.getOmega0()
+								+ eph.getOmegaDot() * tk
+								- Constants.OMEGAE_DOT_BDS * eph.getToe();
+						Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
+
+						// Standard ECEF conversion (same as non-GEO)
+						double X = x1 * Math.cos(Omega) - y1 * Math.cos(ik) * Math.sin(Omega);
+						double Y = x1 * Math.sin(Omega) + y1 * Math.cos(ik) * Math.cos(Omega);
+						double Z = y1 * Math.sin(ik);
+
+						sp = new SatellitePosition(unixTime, satID, satType, X, Y, Z);
+					} else {
+						// Non-GEO: Ω_k = Ω₀ + (Ω̇ - ω_e) * t_k - ω_e * t_oe
+						double Omega = eph.getOmega0()
+								+ (eph.getOmegaDot() - Constants.OMEGAE_DOT_BDS) * tk
+								- Constants.OMEGAE_DOT_BDS * eph.getToe();
+						Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
+
+						sp = new SatellitePosition(unixTime, satID, satType,
+								x1 * Math.cos(Omega) - y1 * Math.cos(ik) * Math.sin(Omega),
+								x1 * Math.sin(Omega) + y1 * Math.cos(ik) * Math.cos(Omega),
+								y1 * Math.sin(ik));
+					}
+
 					sp.setSatelliteClockError(satelliteClockError);
-			
-					// 调试：打印卫星位置和轨道参数
-					double satR = Math.sqrt(sp.getX()*sp.getX() + sp.getY()*sp.getY() + sp.getZ()*sp.getZ());
-					System.err.printf("[DEBUG BDS SatPos] PRN=%d X=%.2f Y=%.2f Z=%.2f (r=%.1f km, tBDT=%.1f, toe=%.1f)%n", 
-							satID, sp.getX(), sp.getY(), sp.getZ(), satR/1000, tBDT, eph.getToe());
-					System.err.printf("[DEBUG BDS SatPos] 轨道: A=%.1f km, e=%.6f, Omega0=%.6f rad%n", 
-							A/1000, eph.getE(), eph.getOmega0());
-			
+
 					// Apply the correction due to the Earth rotation during signal travel time
-					// 使用 BDT 时间计算地球自转校正
-					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tBDT);
+					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, transmitTimeGPST, satType);
 					sp.setSMMultXYZ(R);
-			
+
 					return sp;
 					
 		} else if(satType != 'R'){  // other than GLONASS (GPS, Galileo, QZSS)
@@ -131,12 +175,19 @@ public abstract class EphemerisSystem {
 			
 					// Compute satellite clock error
 					double satelliteClockError = computeSatelliteClockError(unixTime, eph, obsPseudorange);
+					if (Double.isNaN(satelliteClockError)) {
+						return null; // Satellite unhealthy, exclude from solution
+					}
 			
 					// Compute clock corrected transmission time
-					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange);
+					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange, satType);
 			
 					// Compute eccentric anomaly
-					double Ek = computeEccentricAnomaly(tGPS, eph);
+					Double EkObj = computeEccentricAnomaly(tGPS, eph);
+					if (EkObj == null) {
+						return null;
+					}
+					double Ek = EkObj;
 			
 					// Semi-major axis
 					double A = eph.getRootA() * eph.getRootA();
@@ -155,9 +206,11 @@ public abstract class EphemerisSystem {
 							* Math.cos(2 * phi) + eph.getCrs() * Math.sin(2 * phi);
 					double ik = eph.getI0() + eph.getiDot() * tk + eph.getCic() * Math.cos(2 * phi)
 							+ eph.getCis() * Math.sin(2 * phi);
+					// Use system-specific Earth rotation rate (RTKLIB-aligned)
+					double omegaE = RtkLibConstants.omgeForSatType(satType);
 					double Omega = eph.getOmega0()
-							+ (eph.getOmegaDot() - Constants.EARTH_ANGULAR_VELOCITY) * tk
-							- Constants.EARTH_ANGULAR_VELOCITY * eph.getToe();
+							+ (eph.getOmegaDot() - omegaE) * tk
+							- omegaE * eph.getToe();
 					Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
 					double x1 = Math.cos(u) * r;
 					double y1 = Math.sin(u) * r;
@@ -177,7 +230,7 @@ public abstract class EphemerisSystem {
 					sp.setSatelliteClockError(satelliteClockError);
 			
 					// Apply the correction due to the Earth rotation during signal travel time
-					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS);
+					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS, satType);
 					sp.setSMMultXYZ(R);
 			
 					return sp;
@@ -264,10 +317,13 @@ public abstract class EphemerisSystem {
 					
 					/* Compute satellite clock error */
 				    double satelliteClockError = computeSatelliteClockError(unixTime, eph, obsPseudorange);
+				    if (Double.isNaN(satelliteClockError)) {
+						return null; // Satellite unhealthy, exclude from solution
+					}
 //				    System.out.println("satelliteClockError: " + satelliteClockError);
 				    
 					/* Compute clock corrected transmission time */
-					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange);
+					double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange, satType);
 //				    System.out.println("tGPS: " + tGPS);
 					
 				    /* Time from the ephemerides reference epoch */
@@ -435,7 +491,7 @@ public abstract class EphemerisSystem {
 					sp.setSatelliteClockError(satelliteClockError);
 //		
 //					/* Apply the correction due to the Earth rotation during signal travel time */
-					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS);
+					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS, satType);
 					sp.setSMMultXYZ(R);
 		
 					return sp ;
@@ -452,12 +508,24 @@ public abstract class EphemerisSystem {
 
     // Compute satellite clock error
     double satelliteClockError = computeSatelliteClockError(unixTime, eph, obsPseudorange);
+    if (Double.isNaN(satelliteClockError)) {
+      return null; // Satellite unhealthy, exclude from solution
+    }
   
     // Compute clock corrected transmission time
-    double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange);
+    double tGPS = computeClockCorrectedTransmissionTime(unixTime, satelliteClockError, obsPseudorange, satType);
   
-    // Compute eccentric anomaly
-    double Ek = computeEccentricAnomaly(tGPS, eph);
+    // Compute eccentric anomaly (use BDS-specific method for BeiDou satellites)
+    Double EkObj;
+    if (satType == 'C') {
+      EkObj = computeEccentricAnomalyBDS(tGPS, eph);
+    } else {
+      EkObj = computeEccentricAnomaly(tGPS, eph);
+    }
+    if (EkObj == null) {
+      return null;
+    }
+    double Ek = EkObj;
   
     // Semi-major axis
     double A = eph.getRootA() * eph.getRootA();
@@ -476,9 +544,10 @@ public abstract class EphemerisSystem {
         * Math.cos(2 * phi) + eph.getCrs() * Math.sin(2 * phi);
     double ik = eph.getI0() + eph.getiDot() * tk + eph.getCic() * Math.cos(2 * phi)
         + eph.getCis() * Math.sin(2 * phi);
+    double omegaDot = RtkLibConstants.omgeForSatType(satType);
     double Omega = eph.getOmega0()
-        + (eph.getOmegaDot() - Constants.EARTH_ANGULAR_VELOCITY) * tk
-        - Constants.EARTH_ANGULAR_VELOCITY * eph.getToe();
+        + (eph.getOmegaDot() - omegaDot) * tk
+        - omegaDot * eph.getToe();
     Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
     double x1 = Math.cos(u) * r;
     double y1 = Math.sin(u) * r;
@@ -498,7 +567,7 @@ public abstract class EphemerisSystem {
     sp.setSatelliteClockError(satelliteClockError);
   
     // Apply the correction due to the Earth rotation during signal travel time
-    SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS);
+    SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, tGPS, satType);
     sp.setSMMultXYZ(R);
   
     ///////////////////////////
@@ -518,7 +587,9 @@ public abstract class EphemerisSystem {
     double tak = fk;
   
     // Computed mean motion [rad/sec]
-    double n0 = Math.sqrt(Constants.EARTH_GRAVITATIONAL_CONSTANT / Math.pow(A, 3));
+    // Use system-specific GM constant (RTKLIB-aligned)
+    double GM = RtkLibConstants.muForSatType(eph.getSatType());
+    double n0 = Math.sqrt(GM / Math.pow(A, 3));
   
     // Corrected mean motion [rad/sec]
     double n = n0 + eph.getDeltaN();
@@ -529,7 +600,7 @@ public abstract class EphemerisSystem {
     double mkdot = n;
     double ekdot = mkdot/(1.0 - e*Math.cos(ek));
     double takdot = Math.sin(ek)*ekdot*(1.0+e*Math.cos(tak))/(Math.sin(tak)*(1.0-e*Math.cos(ek)));
-    double omegakdot = ( eph.getOmegaDot() - Constants.EARTH_ANGULAR_VELOCITY);
+    double omegakdot = ( eph.getOmegaDot() - omegaDot);
   
     double phik = phi;
     double corr_u = cus*Math.sin(2.0*phik) + cuc*Math.cos(2.0*phik);
@@ -638,18 +709,15 @@ public abstract class EphemerisSystem {
 	/**
 	 * @param traveltime
 	 */
-	protected SimpleMatrix computeEarthRotationCorrection(long unixTime, double receiverClockError, double transmissionTime) {
+	protected SimpleMatrix computeEarthRotationCorrection(long unixTime, double receiverClockError, double transmissionTime, char satType) {
 
-		// Computation of signal travel time
-		// SimpleMatrix diff = satellitePosition.minusXYZ(approxPos);//this.coord.minusXYZ(approxPos);
-		// double rho2 = Math.pow(diff.get(0), 2) + Math.pow(diff.get(1), 2)
-		// 		+ Math.pow(diff.get(2), 2);
-		// double traveltime = Math.sqrt(rho2) / Constants.SPEED_OF_LIGHT;
 		double receptionTime = (new Time(unixTime)).getGpsTime();
 		double traveltime = receptionTime + receiverClockError - transmissionTime;
 
-		// Compute rotation angle
-		double omegatau = Constants.EARTH_ANGULAR_VELOCITY * traveltime;
+		// Compute rotation angle: use system-specific Earth angular velocity
+		// GPS: 7.2921151467E-5, GLO: 7.292115E-5, GAL: 7.2921151467E-5, BDS: 7.292115E-5, QZS: 7.2921151467E-5
+		double omega = RtkLibConstants.omgeForSatType(satType);
+		double omegatau = omega * traveltime;
 
 		// Rotation matrix
 		double[][] data = new double[3][3];
@@ -674,14 +742,19 @@ public abstract class EphemerisSystem {
 
 	/**
 	 * @param eph
-	 * @return Clock-corrected GPS transmission time
+	 * @return Clock-corrected transmission time
 	 */
-	protected double computeClockCorrectedTransmissionTime(long unixTime, double satelliteClockError, double obsPseudorange) {
+	protected double computeClockCorrectedTransmissionTime(long unixTime, double satelliteClockError, double obsPseudorange, char satType) {
 
 		double gpsTime = (new Time(unixTime)).getGpsTime();
 
+		// 星历时间（ToC/ToE）已在Decode1042Msg中统一转换为GPST
+		// 所以不需要GPST→BDT转换，统一使用GPST时间
+		// 注释：之前错误地对北斗卫星做了GPST→BDT转换（减14秒），导致时间基准不匹配
+		double tObs = gpsTime;
+
 		// Remove signal travel time from observation time
-		double tRaw = (gpsTime - obsPseudorange /*this.range*/ / Constants.SPEED_OF_LIGHT);
+		double tRaw = (tObs - obsPseudorange /*this.range*/ / Constants.SPEED_OF_LIGHT);
 
 		return tRaw - satelliteClockError;
 	}
@@ -713,23 +786,38 @@ public abstract class EphemerisSystem {
 			
 		}else{		// other than GLONASS
 				double gpsTime = (new Time(unixTime)).getGpsTime();
+				double tObs = gpsTime;
 				// Remove signal travel time from observation time
-				double tRaw = (gpsTime - obsPseudorange /*this.range*/ / Constants.SPEED_OF_LIGHT);
-		
-				// Compute eccentric anomaly
-				double Ek = computeEccentricAnomaly(tRaw, eph);
-		
+				double tRaw = (tObs - obsPseudorange / Constants.SPEED_OF_LIGHT);
+
+				// Compute eccentric anomaly using BDS constants for BeiDou satellites
+				Double EkObj;
+				if (eph.getSatType() == 'C') {
+					EkObj = computeEccentricAnomalyBDS(tRaw, eph);
+				} else {
+					EkObj = computeEccentricAnomaly(tRaw, eph);
+				}
+				if (EkObj == null) {
+					return Double.NaN; // Satellite unhealthy, clock error cannot be computed
+				}
+				double Ek = EkObj;
+
 				// Relativistic correction term computation
-				double dtr = Constants.RELATIVISTIC_ERROR_CONSTANT * eph.getE() * eph.getRootA() * Math.sin(Ek);
-		
-				// Clock error computation
+				// Use system-specific GM for relativistic correction (strictly following RTKLIB eph2pos)
+				// GPS: 3.9860050E14, GAL: 3.986004418E14, BDS: 3.986004418E14, QZS: 3.9860050E14
+				double gm = RtkLibConstants.muForSatType(eph.getSatType());
+				double dtr = -2.0 * Math.sqrt(gm) * eph.getE() * eph.getRootA() * Math.sin(Ek)
+					/ (Constants.SPEED_OF_LIGHT * Constants.SPEED_OF_LIGHT);
+
+				// Clock error computation (2 iterations, same as RTKLIB eph2clk)
+				// TGD is NOT included in satellite clock error - TGD correction is at pseudorange level
 				double dt = checkGpsTime(tRaw - eph.getToc());
-				double timeCorrection = (eph.getAf2() * dt + eph.getAf1()) * dt + eph.getAf0() + dtr - eph.getTgd();
+				double timeCorrection = (eph.getAf2() * dt + eph.getAf1()) * dt + eph.getAf0() + dtr;
 				double tGPS = tRaw - timeCorrection;
 				dt = checkGpsTime(tGPS - eph.getToc());
-				timeCorrection = (eph.getAf2() * dt + eph.getAf1()) * dt + eph.getAf0() + dtr - eph.getTgd();
-		
-				return timeCorrection;		
+				timeCorrection = (eph.getAf2() * dt + eph.getAf1()) * dt + eph.getAf0() + dtr;
+
+				return timeCorrection;
 		}
 	}
 
@@ -739,7 +827,7 @@ public abstract class EphemerisSystem {
 	 * @param eph
 	 * @return Eccentric anomaly
 	 */
-	protected double computeEccentricAnomaly(double time, EphGps eph) {
+	protected Double computeEccentricAnomaly(double time, EphGps eph) {
 
 		// Semi-major axis
 		double A = eph.getRootA() * eph.getRootA();
@@ -747,8 +835,8 @@ public abstract class EphemerisSystem {
 		// Time from the ephemerides reference epoch
 		double tk = checkGpsTime(time - eph.getToe());
 
-		// Computed mean motion [rad/sec]
-		double n0 = Math.sqrt(Constants.EARTH_GRAVITATIONAL_CONSTANT / Math.pow(A, 3));
+		// Computed mean motion [rad/sec] using system-specific GM (RTKLIB-aligned)
+		double n0 = Math.sqrt(RtkLibConstants.muForSatType(eph.getSatType()) / Math.pow(A, 3));
 
 		// Corrected mean motion [rad/sec]
 		double n = n0 + eph.getDeltaN();
@@ -773,9 +861,12 @@ public abstract class EphemerisSystem {
 				break;
 		}
 
-		// TODO Display/log warning message
-		if (i == maxNumIter)
-			System.out.println("Warning: Eccentric anomaly does not converge.");
+		// If no convergence after max iterations, return null to mark satellite as unhealthy
+		if (i == maxNumIter) {
+			System.err.printf("[WARN] Eccentric anomaly does not converge after %d iterations (PRN=%d), satellite excluded%n",
+					maxNumIter, eph.getSatID());
+			return null;
+		}
 
 		return Ek;
 
@@ -783,11 +874,11 @@ public abstract class EphemerisSystem {
 
 	/**
 	 * @param time
-	 *            (BeiDou time in seconds)
+	 *            (GPST time in seconds, toe 已统一转为 GPST)
 	 * @param eph
 	 * @return Eccentric anomaly for BeiDou satellites
 	 */
-	protected double computeEccentricAnomalyBDS(double time, EphGps eph) {
+	protected Double computeEccentricAnomalyBDS(double time, EphGps eph) {
 
 		// Semi-major axis
 		double A = eph.getRootA() * eph.getRootA();
@@ -821,9 +912,12 @@ public abstract class EphemerisSystem {
 				break;
 		}
 
-		// TODO Display/log warning message
-		if (i == maxNumIter)
-			System.out.println("Warning: Eccentric anomaly does not converge.");
+		// If no convergence after max iterations, return null to mark satellite as unhealthy
+		if (i == maxNumIter) {
+			System.err.printf("[WARN BDS] Eccentric anomaly does not converge after %d iterations (PRN=%d), satellite excluded%n",
+					maxNumIter, eph.getSatID());
+			return null;
+		}
 
 		return Ek;
 

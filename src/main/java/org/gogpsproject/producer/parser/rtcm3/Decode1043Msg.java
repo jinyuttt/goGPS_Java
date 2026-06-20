@@ -24,6 +24,7 @@ public class Decode1043Msg implements Decode {
 	public Object decode(boolean[] bits, int week) {
 		
 		EphBds eph = new EphBds();
+		eph.setSatType('C');
 		int i = 0;
 		
 		// Message Number: 12 bits
@@ -39,14 +40,14 @@ public class Decode1043Msg implements Decode {
 		eph.setGpsWeek(gpsWeek);
 		i += 12;
 		
-		// Toe (Time of Ephemeris): 32 bits, scale 1 second
+		// Toe (Time of Ephemeris): 32 bits, scale 1 second (BDT)
 		long toe = decodeUnsigned(bits, i, 32);
-		eph.setToe((double) toe);
+		eph.setToe((double) toe + 14.0);  // BDT → GPST
 		i += 32;
 		
-		// Toc (Time of Clock): 32 bits, scale 1 second
+		// Toc (Time of Clock): 32 bits, scale 1 second (BDT)
 		long toc = decodeUnsigned(bits, i, 32);
-		eph.setToc((double) toc);
+		eph.setToc((double) toc + 14.0);  // BDT → GPST
 		i += 32;
 		
 		// Af0: 22 bits (signed), scale 2^-34 seconds

@@ -88,12 +88,15 @@ public class LS_DD_code extends LS_SA_code {
     // Computation of master-pivot ionosphere correction
     double masterPivotIonoCorr = master.satIonoCorr[sats.pivot];
 
-    // Compute rover-pivot and master-pivot weights
-    double roverPivotWeight = computeWeight(rover.topo[sats.pivot].getElevation(),
-        roverObs.getSatByIDType(pivotId, satType).getSignalStrength(goGPS.getFreq()));
-    double masterPivotWeight = computeWeight(master.topo[sats.pivot].getElevation(),
-        masterObs.getSatByIDType(pivotId, satType).getSignalStrength(goGPS.getFreq()));
-    Q.set(roverPivotWeight + masterPivotWeight);
+    // Compute pivot variances for DD covariance matrix
+    double roverPivotElevation = rover.topo[sats.pivot].getElevation();
+    double masterPivotElevation = master.topo[sats.pivot].getElevation();
+    double roverPivotSigma = varerr(Math.toRadians(roverPivotElevation), false, satType, goGPS.getFreq());
+    double masterPivotSigma = varerr(Math.toRadians(masterPivotElevation), false, satType, goGPS.getFreq());
+    double pivotVar = roverPivotSigma * roverPivotSigma + masterPivotSigma * masterPivotSigma;
+
+    // Store satellite variances for later covariance matrix construction
+    double[] satVars = new double[nObsAvail];
 
     // Set up the least squares matrices
     for (int i = 0, k = 0; i < nObs; i++) {
@@ -103,7 +106,7 @@ public class LS_DD_code extends LS_SA_code {
       satType = roverObs.getGnssType(i);
       String checkAvailGnss = String.valueOf(satType) + String.valueOf(id);
 
-      if (sats.pos[i] !=null && sats.gnssAvail.contains(checkAvailGnss) && i != sats.pivot) {
+      if (sats.pos[i] !=null && sats.avail.containsKey(id) && sats.gnssAvail.contains(checkAvailGnss) && i != sats.pivot) {
 //      if (sats.pos[i] !=null && sats.avail.contains(id) && satTypeAvail.contains(satType) && i != pivot) {
 
         // Fill in one row in the design matrix
@@ -131,20 +134,17 @@ public class LS_DD_code extends LS_SA_code {
         ionoCorr.set(k, 0, (rover.satIonoCorr[i] - master.satIonoCorr[i])
             - (roverPivotIonoCorr - masterPivotIonoCorr));
 
-        // Fill in the cofactor matrix
-        double roverSatWeight = computeWeight(rover.topo[i].getElevation(),
-            roverObs.getSatByIDType(id, satType).getSignalStrength(goGPS.getFreq()));
-        double masterSatWeight = computeWeight(master.topo[i].getElevation(),
-            masterObs.getSatByIDType(id, satType).getSignalStrength(goGPS.getFreq()));
-        
-        Q.set(k, k, Q.get(k, k) + roverSatWeight + masterSatWeight);
+        // Fill in the cofactor matrix (covariance of DD observations)
+        double roverSatSigma = varerr(Math.toRadians(rover.topo[i].getElevation()), false, satType, goGPS.getFreq());
+        double masterSatSigma = varerr(Math.toRadians(master.topo[i].getElevation()), false, satType, goGPS.getFreq());
+        satVars[k] = roverSatSigma * roverSatSigma + masterSatSigma * masterSatSigma;
 
         // Increment available satellites counter
         k++;
       }
 
       // Design matrix for DOP computation
-      if (sats.pos[i] !=null && sats.gnssAvail.contains(checkAvailGnss)) {
+      if (sats.pos[i] !=null && sats.avail.containsKey(id) && sats.gnssAvail.contains(checkAvailGnss)) {
 //      if (sats.pos[i] != null && sats.avail.contains(id) && satTypeAvail.contains(satType)) {
         // Fill in one row in the design matrix (complete one, for DOP)
         Adop.set(d, 0, rover.diffSat[i].get(0) / rover.satAppRange[i]); /* X */
@@ -158,6 +158,18 @@ public class LS_DD_code extends LS_SA_code {
     b = b.plus(tropoCorr);
     b = b.plus(ionoCorr);
 
+    // Build DD covariance matrix Q:
+    // Q[i][i] = var(sat_i) + var(pivot)
+    // Q[i][j] = var(pivot)  for i != j (common pivot correlation)
+    Q.zero();
+    for (int i = 0; i < nObsAvail; i++) {
+      Q.set(i, i, satVars[i] + pivotVar);
+      for (int j = 0; j < i; j++) {
+        Q.set(i, j, pivotVar);
+        Q.set(j, i, pivotVar);
+      }
+    }
+
     // Least squares solution x = ((A'*Q^-1*A)^-1)*A'*Q^-1*(y0-b);
     x = A.transpose().mult(Q.invert()).mult(A).invert().mult(A.transpose()).mult(Q.invert()).mult(y0.minus(b));
 
@@ -166,15 +178,19 @@ public class LS_DD_code extends LS_SA_code {
 
     // Estimation of the variance of the observation error
     vEstim = y0.minus(A.mult(x).plus(b));
-    double varianceEstim = (vEstim.transpose().mult(Q.invert())
-        .mult(vEstim)).get(0)
-        / (nObsAvail - nUnknowns);
 
     // Covariance matrix of the estimation error
-    if (nObsAvail > nUnknowns){
-      SimpleMatrix covariance = A.transpose().mult(Q.invert()).mult(A).invert()
-          .scale(varianceEstim);
-      positionCovariance = covariance.extractMatrix(0, 3, 0, 3);
+    if (nObsAvail >= nUnknowns){
+      SimpleMatrix cofactor = A.transpose().mult(Q.invert()).mult(A).invert();
+      if (nObsAvail > nUnknowns) {
+        double varianceEstim = (vEstim.transpose().mult(Q.invert())
+            .mult(vEstim)).get(0)
+            / (nObsAvail - nUnknowns);
+        positionCovariance = cofactor.scale(varianceEstim).extractMatrix(0, 3, 0, 3);
+      } else {
+        // nObsAvail == nUnknowns: no redundancy, use cofactor directly
+        positionCovariance = cofactor.extractMatrix(0, 3, 0, 3);
+      }
     }else{
       positionCovariance = null;
     }
@@ -207,14 +223,14 @@ public class LS_DD_code extends LS_SA_code {
       while (obsR != null && obsM != null) {
 
         // Discard master epochs if correspondent rover epochs are not available
-        double obsRtime = obsR.getRefTime().getRoundedGpsTime();
-        while (obsM!=null && obsR!=null && obsRtime > obsM.getRefTime().getRoundedGpsTime()) {
+        double obsRtime = obsR.getRefTime().getGpsTime();
+        while (obsM!=null && obsR!=null && obsRtime > obsM.getRefTime().getGpsTime()) {
           obsM = masterIn.getNextObservations();
         }
 
         // Discard rover epochs if correspondent master epochs are not available
-        double obsMtime = obsM.getRefTime().getRoundedGpsTime();
-        while (obsM!=null && obsR!=null && obsR.getRefTime().getRoundedGpsTime() < obsMtime) {
+        double obsMtime = obsM.getRefTime().getGpsTime();
+        while (obsM!=null && obsR!=null && obsR.getRefTime().getGpsTime() < obsMtime) {
           obsR = roverIn.getNextObservations();
         }
 
@@ -224,13 +240,39 @@ public class LS_DD_code extends LS_SA_code {
           if(obsR.getNumSat() >= 4) {
 
             // Compute approximate positioning by iterative least-squares
-            for (int iter = 0; iter < 3; iter++) {
+            if (!rover.isValidXYZ()) {
+              Coordinates definedPos = roverIn.getDefinedPosition();
+              if (definedPos != null && definedPos.isValidXYZ()) {
+                definedPos.cloneInto(rover);
+              } else {
+                rover.setXYZ(0, 0, 0);
+              }
+            }
+            rover.setClockError(0);
+            
+            // 增加迭代次数到10次，与RTKLIB一致
+            // 在大误差下需要更多迭代才能收敛
+            for (int iter = 0; iter < 10; iter++) {
               
               // Select all satellites
               sats.selectStandalone( obsR, -100);
               
               if (sats.getAvailNumber() >= 4) {
                 dd.codeStandalone( obsR, false, true);
+                
+                // 检测发散：如果位置超出合理范围（距离地球中心超过50000公里），重置为基站坐标
+                double r = Math.sqrt(rover.getX()*rover.getX() + rover.getY()*rover.getY() + rover.getZ()*rover.getZ());
+                if (r > 5.0e7) { // 超过50000公里
+                  System.err.println("[DEBUG LS_DD] 迭代 " + iter + " 位置发散 (r=" + r + " m)，重置为基站坐标");
+                  if (roverIn.getDefinedPosition() != null && roverIn.getDefinedPosition().isValidXYZ()) {
+                    roverIn.getDefinedPosition().cloneInto(rover);
+                  } else if (masterIn != null && masterIn.getDefinedPosition() != null && masterIn.getDefinedPosition().isValidXYZ()) {
+                    masterIn.getDefinedPosition().cloneInto(rover);
+                  } else {
+                    rover.setXYZ(0, 0, 0);
+                  }
+                  rover.setClockError(0);
+                }
               }
             }
 
@@ -244,9 +286,14 @@ public class LS_DD_code extends LS_SA_code {
                 // Compute code double differences positioning
                 // (epoch-by-epoch solution)
                 dd.codeDoubleDifferences( obsR, obsM, masterIn.getDefinedPosition());
-              else
-                // Discard approximate positioning
-                rover.setXYZ(0, 0, 0);
+              else {
+                // Discard approximate positioning, fallback to base position
+                if (masterIn != null && masterIn.getDefinedPosition() != null && masterIn.getDefinedPosition().isValidXYZ()) {
+                  masterIn.getDefinedPosition().cloneInto(rover);
+                } else {
+                  rover.setXYZ(0, 0, 0);
+                }
+              }
             }
 
             if (rover.isValidXYZ()) {

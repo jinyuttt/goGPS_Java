@@ -29,21 +29,20 @@ package org.gogpsproject;
 public class Constants {
 
 	// Speed of Light [m/s]
-	public static final double SPEED_OF_LIGHT = 299792458.0;
+	public static final double SPEED_OF_LIGHT = RtkLibConstants.CLIGHT;
 
 	// Physical quantities as in IS-GPS
-	public static final double EARTH_GRAVITATIONAL_CONSTANT = 3.986005e14;
-	public static final double EARTH_ANGULAR_VELOCITY = 7.2921151467e-5;
-	public static final double RELATIVISTIC_ERROR_CONSTANT = -4.442807633e-10;
+	public static final double EARTH_GRAVITATIONAL_CONSTANT = RtkLibConstants.MU_GPS;
+	public static final double EARTH_ANGULAR_VELOCITY = RtkLibConstants.OMGE;
+	public static final double RELATIVISTIC_ERROR_CONSTANT = RtkLibConstants.RELATIVISTIC_ERROR_CONSTANT;
 
 	// GPS signal approximate travel time
-	public static final double GPS_APPROX_TRAVEL_TIME = 0.072;
+	public static final double GPS_APPROX_TRAVEL_TIME = RtkLibConstants.GPS_APPROX_TRAVEL_TIME;
 
-	// WGS84 ellipsoid features
-	public static final double WGS84_SEMI_MAJOR_AXIS = 6378137;
-	public static final double WGS84_FLATTENING = 1 / 298.257222101;
-	public static final double WGS84_ECCENTRICITY = Math.sqrt(1 - Math.pow(
-			(1 - WGS84_FLATTENING), 2));
+	// WGS84 ellipsoid features (RTKLIB-aligned)
+	public static final double WGS84_SEMI_MAJOR_AXIS = RtkLibConstants.RE_WGS84;
+	public static final double WGS84_FLATTENING = RtkLibConstants.FE_WGS84;
+	public static final double WGS84_ECCENTRICITY = RtkLibConstants.E2_WGS84;
 
 	// Time-related values
 	public static final long DAYS_IN_WEEK = 7L;
@@ -127,11 +126,11 @@ public class Constants {
 	public static final double GM_BDS = 3.986004418e14;                  // BeiDou  Gravitational constant * (mass of Earth) [m^3/s^2]
 	public static final double GM_QZS = 3.986005e14;                     // QZSS    Gravitational constant * (mass of Earth) [m^3/s^2]
     
-	public static final double OMEGAE_DOT_GPS = 7.2921151467e-5;             // GPS     Angular velocity of the Earth rotation [rad/s]
-	public static final double OMEGAE_DOT_GLO = 7.292115e-5;                 // GLONASS Angular velocity of the Earth rotation [rad/s]
-	public static final double OMEGAE_DOT_GAL = 7.2921151467e-5;             // Galileo Angular velocity of the Earth rotation [rad/s]
-	public static final double OMEGAE_DOT_BDS = 7.292115e-5;                 // BeiDou  Angular velocity of the Earth rotation [rad/s]
-	public static final double OMEGAE_DOT_QZS = 7.2921151467e-5;             // QZSS    Angular velocity of the Earth rotation [rad/s]
+	public static final double OMEGAE_DOT_GPS = RtkLibConstants.OMGE;             // GPS     Angular velocity of the Earth rotation [rad/s]
+	public static final double OMEGAE_DOT_GLO = RtkLibConstants.OMGE_GLO;                 // GLONASS Angular velocity of the Earth rotation [rad/s]
+	public static final double OMEGAE_DOT_GAL = RtkLibConstants.OMGE_GAL;             // Galileo Angular velocity of the Earth rotation [rad/s]
+	public static final double OMEGAE_DOT_BDS = RtkLibConstants.OMGE_CMP;                 // BeiDou Earth angular velocity [rad/s] (RTKLIB: OMGE_CMP)
+	public static final double OMEGAE_DOT_QZS = RtkLibConstants.OMGE;             // QZSS    Angular velocity of the Earth rotation [rad/s]
     
 	public static final double J2_GLO = 1.0826257e-3;                        // GLONASS second zonal harmonic of the geopotential
     

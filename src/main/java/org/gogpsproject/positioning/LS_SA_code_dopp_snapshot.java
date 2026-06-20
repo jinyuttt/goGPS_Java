@@ -198,10 +198,9 @@ public class LS_SA_code_dopp_snapshot extends LS_SA_code_snapshot {
         tropoCorr.set(k, 0, rover.satTropoCorr[i]);
         ionoCorr.set( k, 0, rover.satIonoCorr[i]);
      
-        // Fill in the cofactor matrix
+        // Fill in the cofactor matrix (weight = 1/variance)
         double weight = Q.get(k, k)
-            + computeWeight(rover.topo[i].getElevation(),
-                roverObs.getSatByIDType(satId, 'G').getSignalStrength(goGPS.getFreq()));
+            + 1.0 / varerr(Math.toRadians(rover.topo[i].getElevation()), false, roverObs.getGnssType(i), goGPS.getFreq());
         Q.set(k, k, weight);
   
         // Increment available satellites counter

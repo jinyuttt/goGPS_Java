@@ -151,8 +151,7 @@ public class LS_SA_code_coarse_time extends LS_SA_code_snapshot {
         weight = 1;
       else
         weight = Q.get(k, k)
-          + computeWeight(rover.topo[i].getElevation(),
-              roverObs.getSatByIDType(id, 'G').getSignalStrength(goGPS.getFreq()));
+                + 1.0 / varerr(Math.toRadians(rover.topo[i].getElevation()), false, roverObs.getGnssType(i), goGPS.getFreq());
       if( weight>5 )
         weight = 5;
       
@@ -780,8 +779,7 @@ public class LS_SA_code_coarse_time extends LS_SA_code_snapshot {
         weight = 1;
       else
         weight = Q.get(k, k)
-          + computeWeight(rover.topo[i].getElevation(),
-              roverObs.getSatByIDType(id, 'G').getSignalStrength(goGPS.getFreq()));
+          + 1.0 / varerr(Math.toRadians(rover.topo[i].getElevation()), false, roverObs.getGnssType(i), goGPS.getFreq());
       if( weight>5 )
         weight = 5;
       

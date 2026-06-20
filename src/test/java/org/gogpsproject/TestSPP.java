@@ -42,10 +42,10 @@ public class TestSPP {
      */
     public static void main(String[] args) {
         // 强制使用点作为小数分隔符
-        Locale.setDefault(new Locale("en", "US"));
+    //    Locale.setDefault(new Locale("en", "US"));
         int week = 2422;
         // RTCM3文件路径（默认使用桌面上的测试文件）
-        String rtcm3FilePath = "C:\\Users\\jinyu\\Desktop\\1.rtcm3";
+        String rtcm3FilePath = "C:\\Users\\admin\\Desktop\\1.rtcm3";
         
         // 如果命令行提供了文件路径，则使用命令行参数
         if (args.length > 0) {
@@ -98,6 +98,12 @@ public class TestSPP {
             GoGPS goGPS = new GoGPS(rtcm3Reader, rtcm3Reader)
                 .addPositionConsumerListeners(txtProducer)
                 .setDynamicModel(GoGPS.DynamicModel.STATIC)
+                .setCutoff(10)
+                .setFixedHeight(913.0)
+                .setHdopLimit(2.0)
+                .setPosLimit(50000)
+                .setCodeResidThreshold(15)
+                .searchForOutliers(true)
                 .run(RunMode.CODE_STANDALONE);
 
             // 等待处理完成

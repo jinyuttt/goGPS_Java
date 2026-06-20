@@ -20,9 +20,11 @@
  */
 package org.gogpsproject;
 
+import java.io.IOException;
 import java.util.*;
 
 import org.gogpsproject.consumer.PositionConsumer;
+import org.gogpsproject.positioning.AntennaPcv;
 import org.gogpsproject.positioning.*;
 import org.gogpsproject.producer.*;
 
@@ -46,6 +48,16 @@ public class GoGPS implements Runnable, StreamEventProducer{
   // Double-frequency flag
   /** The dual freq. */
   private boolean dualFreq = false;
+
+  // Antenna phase center parameters
+  /** Receiver antenna PCO/PCV parameters */
+  private AntennaPcv receiverAntennaPcv = new AntennaPcv();
+
+  /** Receiver antenna delta {e, n, u} (m) */
+  private double[] antennaDelta = new double[]{0.0, 0.0, 0.0};
+
+  /** Satellite antenna PCO/PCV parameters (keyed by satellite ID) */
+  private Map<Integer, AntennaPcv> satelliteAntennaPcv = new HashMap<>();
 
   // Weighting strategy
   // 0 = same weight for all observations
@@ -84,7 +96,39 @@ public class GoGPS implements Runnable, StreamEventProducer{
 
   /** The cycle slip threshold. */
   private double cycleSlipThreshold = 1;
-	
+
+  /** LAMBDA ambiguity ratio test threshold (RTKLIB default: 3.0) */
+  private double ambiguityRatioThreshold = 3.0;
+
+  public static enum IonoOpt {
+    OFF,   // Ignore ionosphere
+    EST,   // Estimate ionospheric delay (RTKLIB default)
+    IFLC   // Ionosphere-free linear combination
+  }
+
+  public static enum TropOpt {
+    OFF,   // Saastamoinen model only
+    EST    // Estimate ZTD (RTKLIB default)
+  }
+
+  /** Ionospheric estimation option (RTKLIB-aligned: IONOOPT_EST by default) */
+  private IonoOpt ionoOpt = IonoOpt.EST;
+
+  /** Tropospheric estimation option (RTKLIB-aligned: TROPOPT_EST by default) */
+  private TropOpt tropOpt = TropOpt.EST;
+
+  /** Ionospheric process noise (m²/s, RTKLIB default: 1e-4) */
+  private double prnIono = 1e-4;
+
+  /** Tropospheric process noise (m²/s, RTKLIB default: 1e-8) */
+  private double prnTropo = 1e-8;
+
+  /** Initial ionospheric sigma (m, RTKLIB default: 0.03) */
+  private double sigIono = 0.03;
+
+  /** Initial tropospheric sigma (m, RTKLIB default: 0.3) */
+  private double sigTropo = 0.3;
+
   public static enum CycleSlipDetectionStrategy {
     APPROX_PSEUDORANGE,
     DOPPLER_PREDICTED_PHASE_RANGE
@@ -104,6 +148,11 @@ public class GoGPS implements Runnable, StreamEventProducer{
 
   /** The Elevation cutoff. */
   private double cutoff = 15; // Elevation cutoff
+
+  /** Fixed height constraint (ellipsoidal height in meters).
+   *  null = free 3D solution (no height constraint).
+   *  Set for BDS-GEO-only projects where vertical is unobservable (e.g. 913.0). */
+  private Double fixedHeight = null;
 
   public static enum RunMode {
     CODE_STANDALONE,
@@ -171,7 +220,28 @@ public class GoGPS implements Runnable, StreamEventProducer{
   private double phaseResidThreshold = 0.05;
 
   private boolean searchForOutliers = false;
- 
+
+  /** Max distance from base station before KF position is declared diverged (m, default 100km) */
+  private double maxDivergenceDistance = 100000;
+
+  /** Max satellite ID for dopplerPredPhase array allocation (default 200 covers all GNSS constellations) */
+  private int maxSatId = 200;
+
+  /** Max consecutive divergence epochs before full KF reset (RTKLIB-aligned, default 5) */
+  private int maxDivergenceReset = 5;
+
+  /** Large noise value for down-weighting outlier observations (m^2, default 1e6) */
+  private double largeNoiseValue = 1e6;
+
+  /** Chi-square innovation test threshold (sigma, RTKLIB-aligned, default 5.0) */
+  private double chiSquareThreshold = 5.0;
+
+  /** GF (Geometry-Free) cycle-slip detection threshold (m, default 0.05) */
+  private double gfCycleSlipThreshold = 0.05;
+
+  /** Max epoch time difference for master-rover alignment (ms, default 500) */
+  private long maxTimeDiffMs = 500;
+
 	private Vector<StreamEventListener> streamEventListeners = new Vector<StreamEventListener>();
   
   /**
@@ -275,6 +345,99 @@ public class GoGPS implements Runnable, StreamEventProducer{
   }
 
   /**
+   * Gets the receiver antenna PCO/PCV parameters.
+   *
+   * @return the receiver antenna PCV
+   */
+  public AntennaPcv getReceiverAntennaPcv() {
+    return receiverAntennaPcv;
+  }
+
+  /**
+   * Sets the receiver antenna PCO/PCV parameters.
+   *
+   * @param pcv the receiver antenna PCV to set
+   */
+  public void setReceiverAntennaPcv(AntennaPcv pcv) {
+    this.receiverAntennaPcv = pcv;
+  }
+
+  /**
+   * Gets the receiver antenna delta {e, n, u} (m).
+   *
+   * @return the antenna delta
+   */
+  public double[] getAntennaDelta() {
+    return antennaDelta;
+  }
+
+  /**
+   * Sets the receiver antenna delta {e, n, u} (m).
+   *
+   * @param delta the antenna delta to set
+   */
+  public void setAntennaDelta(double[] delta) {
+    this.antennaDelta = delta;
+  }
+
+  /**
+   * Gets the satellite antenna PCO/PCV parameters for a given satellite.
+   *
+   * @param satId the satellite ID
+   * @return the satellite antenna PCV, or a default (zero) PCV
+   */
+  public AntennaPcv getSatelliteAntennaPcv(int satId) {
+    AntennaPcv pcv = satelliteAntennaPcv.get(satId);
+    return pcv != null ? pcv : receiverAntennaPcv; // fallback to default
+  }
+
+  /**
+   * Sets the satellite antenna PCO/PCV parameters.
+   *
+   * @param satId the satellite ID
+   * @param pcv   the satellite antenna PCV to set
+   */
+  public void setSatelliteAntennaPcv(int satId, AntennaPcv pcv) {
+    this.satelliteAntennaPcv.put(satId, pcv);
+  }
+
+  /**
+   * Loads ANTEX format antenna file and populates satellite/receiver antenna PCV data.
+   * @param filePath path to .atx file
+   */
+  public void loadAntexFile(String filePath) throws IOException {
+    List<AntennaPcv> pcvs = AntexReader.read(filePath);
+    for (AntennaPcv pcv : pcvs) {
+      if (pcv.getSat() != 0) {
+        this.satelliteAntennaPcv.put(pcv.getSat(), pcv);
+      }
+    }
+    if (isDebug()) {
+      System.out.println("[Antex] Loaded " + pcvs.size() + " antenna entries from " + filePath);
+    }
+  }
+
+  /**
+   * Sets the receiver antenna by searching in loaded ANTEX data.
+   * @param filePath path to .atx file
+   * @param antennaType receiver antenna type (e.g. "TRM55971.00")
+   */
+  public void setReceiverAntennaFromAntex(String filePath, String antennaType) throws IOException {
+    List<AntennaPcv> pcvs = AntexReader.read(filePath);
+    for (AntennaPcv pcv : pcvs) {
+      if (pcv.getSat() == 0 && pcv.getType().equals(antennaType)) {
+        this.receiverAntennaPcv = pcv;
+        if (isDebug()) {
+          System.out.println("[Antex] Set receiver antenna: " + antennaType + " PCO=["
+              + pcv.getOff(0, 0) + "," + pcv.getOff(0, 1) + "," + pcv.getOff(0, 2) + "]");
+        }
+        return;
+      }
+    }
+    System.err.println("[Antex] Receiver antenna type not found: " + antennaType);
+  }
+
+  /**
    * Checks if is dual freq.
    *
    * @return the dualFreq
@@ -314,6 +477,27 @@ public class GoGPS implements Runnable, StreamEventProducer{
   }
 
   /**
+   * Gets the fixed height constraint.
+   *
+   * @return null if no constraint, otherwise the ellipsoidal height in meters
+   */
+  public Double getFixedHeight() {
+  	return fixedHeight;
+  }
+
+  /**
+   * Sets the fixed height constraint.
+   * Set to null for free 3D solution (multi-constellation, RTK, etc.).
+   * Set to e.g. 913.0 for BDS-GEO-only projects where vertical is unobservable.
+   *
+   * @param fixedHeight the ellipsoidal height in meters, or null to disable
+   */
+  public GoGPS setFixedHeight(Double fixedHeight) {
+  	this.fixedHeight = fixedHeight;
+  	return this;
+  }
+
+  /**
    * Gets the cycle slip threshold.
    *
    * @return the cycle slip threshold
@@ -332,6 +516,34 @@ public class GoGPS implements Runnable, StreamEventProducer{
   	this.cycleSlipThreshold = csThreshold;
     return this;
   }
+
+  /**
+   * @return the LAMBDA ambiguity ratio test threshold
+   */
+  public double getAmbiguityRatioThreshold() {
+    return ambiguityRatioThreshold;
+  }
+
+  /**
+   * Sets the LAMBDA ambiguity ratio test threshold.
+   * @param thr ratio threshold (RTKLIB default: 3.0)
+   */
+  public void setAmbiguityRatioThreshold(double thr) {
+    this.ambiguityRatioThreshold = thr;
+  }
+
+  public IonoOpt getIonoOpt() { return ionoOpt; }
+  public void setIonoOpt(IonoOpt opt) { this.ionoOpt = opt; }
+  public TropOpt getTropOpt() { return tropOpt; }
+  public void setTropOpt(TropOpt opt) { this.tropOpt = opt; }
+  public double getPrnIono() { return prnIono; }
+  public void setPrnIono(double v) { this.prnIono = v; }
+  public double getPrnTropo() { return prnTropo; }
+  public void setPrnTropo(double v) { this.prnTropo = v; }
+  public double getSigIono() { return sigIono; }
+  public void setSigIono(double v) { this.sigIono = v; }
+  public double getSigTropo() { return sigTropo; }
+  public void setSigTropo(double v) { this.sigTropo = v; }
 
   /**
    * Gets the weights.
@@ -471,6 +683,76 @@ public class GoGPS implements Runnable, StreamEventProducer{
   
   public boolean searchForOutliers() {
 	return searchForOutliers ;
+  }
+
+  /** @return max divergence distance from base station (m) */
+  public double getMaxDivergenceDistance() {
+    return maxDivergenceDistance;
+  }
+
+  public GoGPS setMaxDivergenceDistance(double maxDivergenceDistance) {
+    this.maxDivergenceDistance = maxDivergenceDistance;
+    return this;
+  }
+
+  /** @return max satellite ID for array allocation */
+  public int getMaxSatId() {
+    return maxSatId;
+  }
+
+  public GoGPS setMaxSatId(int maxSatId) {
+    this.maxSatId = maxSatId;
+    return this;
+  }
+
+  /** @return max consecutive divergence epochs before full KF reset */
+  public int getMaxDivergenceReset() {
+    return maxDivergenceReset;
+  }
+
+  public GoGPS setMaxDivergenceReset(int maxDivergenceReset) {
+    this.maxDivergenceReset = maxDivergenceReset;
+    return this;
+  }
+
+  /** @return large noise value for down-weighting outliers (m^2) */
+  public double getLargeNoiseValue() {
+    return largeNoiseValue;
+  }
+
+  public GoGPS setLargeNoiseValue(double largeNoiseValue) {
+    this.largeNoiseValue = largeNoiseValue;
+    return this;
+  }
+
+  /** @return chi-square innovation test threshold (sigma) */
+  public double getChiSquareThreshold() {
+    return chiSquareThreshold;
+  }
+
+  public GoGPS setChiSquareThreshold(double chiSquareThreshold) {
+    this.chiSquareThreshold = chiSquareThreshold;
+    return this;
+  }
+
+  /** @return GF (Geometry-Free) cycle-slip detection threshold (m) */
+  public double getGfCycleSlipThreshold() {
+    return gfCycleSlipThreshold;
+  }
+
+  public GoGPS setGfCycleSlipThreshold(double gfCycleSlipThreshold) {
+    this.gfCycleSlipThreshold = gfCycleSlipThreshold;
+    return this;
+  }
+
+  /** @return max epoch time difference for master-rover alignment (ms) */
+  public long getMaxTimeDiffMs() {
+    return maxTimeDiffMs;
+  }
+
+  public GoGPS setMaxTimeDiffMs(long maxTimeDiffMs) {
+    this.maxTimeDiffMs = maxTimeDiffMs;
+    return this;
   }
 
   public double getHdopLimit(){
@@ -650,7 +932,7 @@ public class GoGPS implements Runnable, StreamEventProducer{
   /**
    * Run code standalone.
    *
-   * @param getNthPosition the get nth position
+
    * @return the coordinates
    * @throws Exception
    */

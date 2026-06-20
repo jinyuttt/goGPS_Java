@@ -119,17 +119,25 @@ public class TxtProducer extends Thread implements PositionConsumer {
 			pw.printf("%16.3f%16.3f%16.3f", X, Y, Z);
 
 			//UTM north, UTM east, orthometric height, UTM zone
-			int noData = -9999;
-			double utmNorth = noData;
-			double utmEast = noData;
-			double hOrtho = noData;
-			String utmZone = "-9999";
+			double hOrtho = -9999;
+			double utmNorth, utmEast;
+			int utmZone;
+			try {
+				coord.computeUTM();
+				utmNorth = coord.getUTMNorthing();
+				utmEast = coord.getUTMEasting();
+				utmZone = coord.getUTMZone();
+			} catch (Exception e) {
+				utmNorth = -9999;
+				utmEast = -9999;
+				utmZone = -9999;
+			}
 			
-			pw.printf("%16.3f%16.3f%16.3f%16s", utmNorth, utmEast, hOrtho, utmZone);
+			pw.printf("%16.3f%16.3f%16.3f%16d", utmNorth, utmEast, hOrtho, utmZone);
 			
 			//HDOP, KHDOP
-			double hdop = noData;
-			double khdop = noData;
+			double hdop = -9999;
+			double khdop = -9999;
 			if (coord.getDopType() == DopType.KALMAN ) {
 			  khdop = coord.gethDop();
 			} else {

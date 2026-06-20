@@ -7,6 +7,8 @@
 package org.gogpsproject.producer.parser.rtcm3;
 
 import org.gogpsproject.ephemeris.EphBds;
+import org.gogpsproject.positioning.Time;
+import org.gogpsproject.util.Bits;
 
 /**
  * RTCM3 Message Type 1042/63 - BeiDou Ephemeris Data
@@ -19,8 +21,8 @@ import org.gogpsproject.ephemeris.EphBds;
  */
 public class Decode1042Msg implements Decode {
 
-	/** Expected total content length in bits (511 data + 1 padding) */
-	private static final int EXPECTED_BITS = 512;
+	/** Expected total content length in bits (12 msg type + 499 data) */
+	private static final int EXPECTED_BITS = 511;
 
 	/* Scale factors matching RTKLIB P2_xx constants */
 	private static final double P2_6  = Math.pow(2, -6);   /* 0.015625 */
@@ -52,6 +54,7 @@ public class Decode1042Msg implements Decode {
 		eph.setSatType('C');
 		
 		// Message Number: 12 bits (already read by caller)
+		// Note: bits array contains message content only (preamble+length stripped by RTCM3Client)
 		i += 12;
 		
 		// ========== 按 RTKLIB decode_type1042 顺序解析 ==========
@@ -65,13 +68,8 @@ public class Decode1042Msg implements Decode {
 		// BDS Week: 13 bits
 		if (i + 13 > maxBits) return partialResult(eph, "Week", i, maxBits);
 		int bdsWeek = (int) decodeUnsigned(bits, i, 13);
-		// 调试：打印原始 BDS Week 值
-		System.err.printf("[DEBUG Decode1042] BDS Week 原始值: %d, satID=%d%n", bdsWeek, satID);
 		// 转换 BDS 周 → GPS 周 (BDS 周 0 = GPS 周 1356)
-		// 注意：如果 Week 值已经是 GPS 周格式，则不需要加 1356
-		// 通常 RTCM3 1042 消息中的 Week 是相对于 BDS 历元的周数
 		eph.setWeek(bdsWeek + 1356);
-		System.err.printf("[DEBUG Decode1042] 设置 GPS Week: %d, satID=%d%n", eph.getWeek(), satID);
 		i += 13;
 		
 		// SV Accuracy (URA): 4 bits
@@ -95,8 +93,12 @@ public class Decode1042Msg implements Decode {
 		
 		// ToC: 17 bits, scale 8.0 seconds
 		if (i + 17 > maxBits) return partialResult(eph, "ToC", i, maxBits);
-		double toc = decodeUnsigned(bits, i, 17) * 8.0;
+		long rawToc = decodeUnsigned(bits, i, 17);
+		double toc = rawToc * 8.0;
+		// BDT ToC转换为GPST ToC（BDT = GPST - 14秒）
+		toc = toc + 14.0;
 		eph.setToc(toc);
+
 		i += 17;
 		
 		// af2: 11 bits, scale 2^-66
@@ -111,9 +113,9 @@ public class Decode1042Msg implements Decode {
 		eph.setAf1(af1);
 		i += 22;
 		
-		// af0: 24 bits, scale 2^-33
+		// af0: 24 bits, scale 2^-33 (BDS clock bias)
 		if (i + 24 > maxBits) return partialResult(eph, "af0", i, maxBits);
-		double af0 = decodeSigned(bits, i, 24) * Math.pow(2, -33);
+		double af0 = decodeSigned(bits, i, 24) * P2_33;
 		eph.setAf0(af0);
 		i += 24;
 		
@@ -138,8 +140,6 @@ public class Decode1042Msg implements Decode {
 		// M0: 32 bits, scale 2^-31 * PI (semi-circles -> radians)
 		if (i + 32 > maxBits) return partialResult(eph, "M0", i, maxBits);
 		double M0 = decodeSigned(bits, i, 32) * P2_31 * Math.PI;
-		System.err.printf("[DEBUG Decode1042] M0 原始值=%d, 缩放后=%.10f rad, satID=%d%n", 
-				(int)decodeSigned(bits, i, 32), M0, satID);
 		eph.setM0(M0);
 		i += 32;
 		
@@ -152,8 +152,6 @@ public class Decode1042Msg implements Decode {
 		// Eccentricity e: 32 bits, scale 2^-33
 		if (i + 32 > maxBits) return partialResult(eph, "e", i, maxBits);
 		double ecc = decodeUnsigned(bits, i, 32) * P2_33;
-		System.err.printf("[DEBUG Decode1042] e 原始值=%d, 缩放后=%.10f, satID=%d%n", 
-				(int)decodeUnsigned(bits, i, 32), ecc, satID);
 		eph.setE(ecc);
 		i += 32;
 		
@@ -163,19 +161,19 @@ public class Decode1042Msg implements Decode {
 		eph.setCus(cus);
 		i += 18;
 		
-		// sqrtA: 32 bits, scale 2^-19
+		// sqrtA: 32 bits, scale 2^-19 (BDS standard, unit: m^0.5)
 		if (i + 32 > maxBits) return partialResult(eph, "sqrtA", i, maxBits);
-		double sqrtA = decodeUnsigned(bits, i, 32) * P2_19;
-		System.err.printf("[DEBUG Decode1042] sqrtA 原始值=%d, 缩放后=%.4f (对应半长轴=%.1f km), satID=%d%n", 
-				(int)(decodeUnsigned(bits, i, 32)), sqrtA, sqrtA*sqrtA/1000, satID);
+		long rawSqrtA = decodeUnsigned(bits, i, 32);
+		double sqrtA = rawSqrtA * P2_19;
 		eph.setRootA(sqrtA);
 		i += 32;
 		
 		// Toe: 17 bits, scale 8.0 seconds
 		if (i + 17 > maxBits) return partialResult(eph, "Toe", i, maxBits);
-		double toe = decodeUnsigned(bits, i, 17) * 8.0;
-		// 调试：打印 Toe 值
-		System.err.printf("[DEBUG Decode1042] Toe=%.1f (%.1f秒), satID=%d%n", toe, toe, satID);
+		long rawToe = decodeUnsigned(bits, i, 17);
+		double toe = rawToe * 8.0;
+		// BDT ToE转换为GPST ToE（BDT = GPST - 14秒）
+		toe = toe + 14.0;
 		eph.setToe(toe);
 		i += 17;
 		
@@ -188,8 +186,6 @@ public class Decode1042Msg implements Decode {
 		// OMEGA0: 32 bits, scale 2^-31 * PI (semi-circles -> radians)
 		if (i + 32 > maxBits) return partialResult(eph, "OMEGA0", i, maxBits);
 		double omega0 = decodeSigned(bits, i, 32) * P2_31 * Math.PI;
-		System.err.printf("[DEBUG Decode1042] Omega0 原始值=%d, 缩放后=%.10f rad, satID=%d%n", 
-				(int)decodeSigned(bits, i, 32), omega0, satID);
 		eph.setOmega0(omega0);
 		i += 32;
 		
@@ -223,15 +219,15 @@ public class Decode1042Msg implements Decode {
 		eph.setOmegaDot(omegaDot);
 		i += 24;
 		
-		// TGD1 (B1I group delay): 10 bits, scale 0.1 ns = 1e-10 s
+		// TGD1 (B1I group delay): 10 bits, scale 2^-33 s
 		if (i + 10 > maxBits) return partialResult(eph, "TGD1", i, maxBits);
-		double tgd1 = decodeSigned(bits, i, 10) * 1e-10;
+		double tgd1 = decodeSigned(bits, i, 10) * P2_33;
 		eph.setTgd(tgd1);
 		i += 10;
 		
-		// TGD2 (B2I group delay): 10 bits, scale 0.1 ns = 1e-10 s
+		// TGD2 (B2I group delay): 10 bits, scale 2^-33 s
 		if (i + 10 > maxBits) return partialResult(eph, "TGD2", i, maxBits);
-		double tgd2 = decodeSigned(bits, i, 10) * 1e-10;
+		double tgd2 = decodeSigned(bits, i, 10) * P2_33;
 		eph.setTgd2(tgd2);
 		i += 10;
 		
@@ -245,6 +241,11 @@ public class Decode1042Msg implements Decode {
 		if (i > EXPECTED_BITS) {
 			System.err.printf("RTCM3 1042 内部错误: 预期 %d bits, 实际读取 %d bits%n", EXPECTED_BITS, i);
 		}
+		
+		// 设置星历参考时间 refTime（使用GPST时间基准）
+		// ToC已在上面转换为GPST格式
+		Time refTime = new Time(bdsWeek + 1356, toc);  // GPS周 + GPST时间
+		eph.setRefTime(refTime);
 		
 		return eph;
 	}
@@ -261,9 +262,8 @@ public class Decode1042Msg implements Decode {
 	private long decodeUnsigned(boolean[] bits, int start, int length) {
 		long result = 0;
 		for (int j = 0; j < length; j++) {
-			int idx = start + j;
-			if (idx >= bits.length) break;
-			if (bits[idx]) {
+			int readIdx = start + j;
+			if (readIdx < bits.length && bits[readIdx]) {
 				result |= (1L << (length - 1 - j));
 			}
 		}
@@ -273,7 +273,6 @@ public class Decode1042Msg implements Decode {
 	private long decodeSigned(boolean[] bits, int start, int length) {
 		long unsigned = decodeUnsigned(bits, start, length);
 		long msb = 1L << (length - 1);
-		
 		if ((unsigned & msb) != 0) {
 			return unsigned - (1L << length);
 		}

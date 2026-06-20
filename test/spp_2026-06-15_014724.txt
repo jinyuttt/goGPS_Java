@@ -1,2 +1,0 @@
-    Date        GPS time        GPS week         GPS tow        Latitude       Longitude     h (ellips.)          ECEF X          ECEF Y          ECEF Z       UTM North        UTM East     h (orthom.)        UTM zone            HDOP           KHDOP
-26/06/07    17:03:03.000            2422    61383.000000     20.36131582    122.71630855    16855934.255   -11774225.465    18328763.206     8070080.459       -9999.000       -9999.000       -9999.000           -9999           0.907       -9999.000

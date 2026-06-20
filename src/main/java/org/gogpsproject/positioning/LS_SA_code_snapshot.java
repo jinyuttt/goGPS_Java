@@ -10,6 +10,7 @@ import org.gogpsproject.Status;
 import org.gogpsproject.consumer.PositionConsumer;
 import org.gogpsproject.producer.ObservationSet;
 import org.gogpsproject.producer.Observations;
+import org.gogpsproject.producer.parser.IonoGps;
 
 public class LS_SA_code_snapshot extends LS_SA_dopplerPos {
 
@@ -234,10 +235,9 @@ public class LS_SA_code_snapshot extends LS_SA_dopplerPos {
         tropoCorr.set(k, 0, rover.satTropoCorr[i]);
         ionoCorr.set(k, 0, rover.satIonoCorr[i]);
      
-        // Fill in the cofactor matrix
+        // Fill in the cofactor matrix (weight = 1/variance)
         double weight = Q.get(k, k)
-            + computeWeight(rover.topo[i].getElevation(),
-                roverObs.getSatByIDType(satId, 'G').getSignalStrength(goGPS.getFreq()));
+            + 1.0 / varerr(Math.toRadians(rover.topo[i].getElevation()), false, roverObs.getGnssType(i), goGPS.getFreq());
         Q.set(k, k, weight);
   
         // Increment available satellites counter
@@ -619,11 +619,36 @@ public class LS_SA_code_snapshot extends LS_SA_dopplerPos {
 
       double el = rover.topo[i].getElevation();
       
-      // Correct approximate pseudorange for troposphere
-      rover.satTropoCorr[i] = Satellites.computeTroposphereCorrection(rover.topo[i].getElevation(), rover.getGeodeticHeight());
+      // Correct approximate pseudorange for troposphere (RTKLIB-aligned)
+      rover.satTropoCorr[i] = Satellites.computeTroposphereCorrection(
+          Math.toRadians(rover.getGeodeticLatitude()),
+          rover.getGeodeticHeight(),
+          Math.toRadians(rover.topo[i].getElevation()));
 
-      // Correct approximate pseudorange for ionosphere
-      rover.satIonoCorr[i] = Satellites.computeIonosphereCorrection( goGPS.getNavigation(), rover, rover.topo[i].getAzimuth(), rover.topo[i].getElevation(), roverObs.getRefTime());
+      // Correct approximate pseudorange for ionosphere (RTKLIB-aligned)
+      IonoGps ionoGps = goGPS.getNavigation().getIono(roverObs.getRefTime().getMsec());
+      double[] ionParams = (ionoGps != null)
+          ? new double[]{ionoGps.getAlpha(0), ionoGps.getAlpha(1), ionoGps.getAlpha(2), ionoGps.getAlpha(3),
+                         ionoGps.getBeta(0),  ionoGps.getBeta(1),  ionoGps.getBeta(2),  ionoGps.getBeta(3)}
+          : null;
+      rover.satIonoCorr[i] = Satellites.computeIonosphereCorrection(
+          roverObs.getRefTime().getGpsTime(),
+          ionParams,
+          Math.toRadians(rover.getGeodeticLatitude()),
+          Math.toRadians(rover.getGeodeticLongitude()),
+          Math.toRadians(rover.topo[i].getAzimuth()),
+          Math.toRadians(rover.topo[i].getElevation()));
+
+      // Correct approximate pseudorange for antenna phase center (RTKLIB-aligned)
+      double azRad_ = Math.toRadians(rover.topo[i].getAzimuth());
+      double elRad_ = Math.toRadians(rover.topo[i].getElevation());
+      double rcvAntCorr_ = Satellites.antennaCorrection(goGPS.getReceiverAntennaPcv(),
+          goGPS.getAntennaDelta(), azRad_, elRad_, 1, goGPS.getFreq());
+      double[] rs_ = {sats.pos[i].getX(), sats.pos[i].getY(), sats.pos[i].getZ()};
+      double[] rr_ = {rover.getX(), rover.getY(), rover.getZ()};
+      double satAntCorr_ = Satellites.satelliteAntennaCorrection(rs_, rr_,
+          goGPS.getSatelliteAntennaPcv(id), goGPS.getFreq());
+      rover.satAntennaCorr[i] = rcvAntCorr_ + satAntCorr_;
 
       sats.avail.put(id, sats.pos[i]);
       sats.typeAvail.add(satType);

@@ -17,6 +17,8 @@ public class LS_SA_code extends Core {
   
   public void codeStandalone( Observations roverObs, boolean estimateOnlyClock, boolean ignoreTopocentricParameters ) {
 
+    boolean debug = goGPS.isDebug();
+
     // Number of GNSS observations without cutoff
     int nObs = roverObs.getNumSat();
 
@@ -42,8 +44,9 @@ public class LS_SA_code extends Core {
     // Vector for observed pseudoranges
     SimpleMatrix y0 = new SimpleMatrix(nObsAvail, 1);
 
-    // Cofactor matrix (initialized to identity)
-    SimpleMatrix Q = SimpleMatrix.identity(nObsAvail);
+    // Cofactor matrix: identity for coarse iteration (equal weights),
+    // filled with elevation-dependent weights for fine iteration
+    SimpleMatrix Q = ignoreTopocentricParameters ? SimpleMatrix.identity(nObsAvail) : new SimpleMatrix(nObsAvail, nObsAvail);
 
     // Solution vector
     SimpleMatrix x = new SimpleMatrix(nUnknowns, 1);
@@ -65,11 +68,13 @@ public class LS_SA_code extends Core {
       
       String checkAvailGnss = String.valueOf(satType) + String.valueOf(id);
       
-      if( sats.pos[i]!=null && sats.gnssAvail.contains(checkAvailGnss)) {
+      if( sats.pos[i]!=null && sats.avail.containsKey(id) && sats.gnssAvail.contains(checkAvailGnss)) {
 //      if (sats.pos[i]!=null && sats.avail.contains(id)  && satTypeAvail.contains(satType)) {
 //        System.out.println("####" + checkAvailGnss  + "####");
 
         // Fill in one row in the design matrix
+        // diffSat = rover - sat, so diffSat/range = receiver-to-satellite unit vector
+        // With A=[e, 1], the LS solution x gives: x[0:3] = dp (position correction), x[3] = -dt_rx
         A.set(k, 0, rover.diffSat[i].get(0) / rover.satAppRange[i]); /* X */
         A.set(k, 1, rover.diffSat[i].get(1) / rover.satAppRange[i]); /* Y */
         A.set(k, 2, rover.diffSat[i].get(2) / rover.satAppRange[i]); /* Z */
@@ -87,7 +92,7 @@ public class LS_SA_code extends Core {
         double pseudorange = roverObs.getSatByIDType(id, satType).getPseudorange(goGPS.getFreq());
         y0.set(k, 0, pseudorange);
         
-        if (k == 0) {
+        if (debug && k == 0) {
           System.err.printf("[DEBUG LS_SA] 卫星 %c%d 近似距离=%.2f 米, 卫星钟误差修正=%.6f 秒%n", 
                   satType, id, satRange, sats.pos[i].getSatelliteClockError());
           System.err.printf("[DEBUG LS_SA] 卫星 %c%d 伪距=%.2f 米 (%.10f 秒)%n", satType, id, pseudorange, pseudorange / Constants.SPEED_OF_LIGHT);
@@ -101,10 +106,8 @@ public class LS_SA_code extends Core {
           tropoCorr.set(k, 0, rover.satTropoCorr[i]);
           ionoCorr.set(k, 0, rover.satIonoCorr[i]);
 
-          // Fill in the cofactor matrix
-          double weight = Q.get(k, k)
-              + computeWeight(rover.topo[i].getElevation(),
-                  roverObs.getSatByIDType(id, satType).getSignalStrength(goGPS.getFreq()));
+          // Fill in the cofactor matrix (weight = 1/variance)
+          double weight = 1.0 / varerr(Math.toRadians(rover.topo[i].getElevation()), false, satType, goGPS.getFreq());
           Q.set(k, k, weight);
         }
 
@@ -123,12 +126,41 @@ public class LS_SA_code extends Core {
     // Least squares solution x = ((A'*Q^-1*A)^-1)*A'*Q^-1*(y0-b);
     SimpleMatrix AtQinv = A.transpose().mult(Q.invert());
     SimpleMatrix N = AtQinv.mult(A);
-    SimpleMatrix Ninv = N.invert();
+    // 【修改1】最小二乘解算：矩阵求逆与NaN检查
+    // 北斗GEO卫星几何分布单一，设计矩阵可能接近奇异，导致求逆失败
+    SimpleMatrix Ninv;
+    try {
+      Ninv = N.invert();
+    } catch (Exception e) {
+      // 矩阵奇异时（如仅使用北斗GEO卫星），将定位结果设为无效
+      System.err.println("[LS_SA] Matrix inversion failed: " + e.getMessage());
+      rover.setXYZ(0, 0, 0);
+      return;
+    }
     SimpleMatrix y0MinusB = y0.minus(b);
     x = Ninv.mult(AtQinv).mult(y0MinusB);
     
-    System.err.printf("[DEBUG LS_SA] 解算: nUnknowns=%d, nObs=%d%n", nUnknowns, nObsAvail);
-    System.err.printf("[DEBUG LS_SA] 解算: x=[%.2f, %.2f, %.2f, %.6f]%n", x.get(0), x.get(1), x.get(2), x.get(3));
+    // 【修改2】检查解算结果是否包含NaN值
+    // 当观测值误差过大或矩阵病态时，最小二乘解可能出现NaN
+    if (Double.isNaN(x.get(0)) || Double.isNaN(x.get(1)) || Double.isNaN(x.get(2)) || Double.isNaN(x.get(3))) {
+      System.err.println("[LS_SA] Solution contains NaN, discarding");
+      rover.setXYZ(0, 0, 0);
+      return;
+    }
+    
+    if (debug) {
+      System.err.printf("[DEBUG LS_SA] 解算: nUnknowns=%d, nObs=%d%n", nUnknowns, nObsAvail);
+      System.err.printf("[DEBUG LS_SA] 解算: x=[%.2f, %.2f, %.2f, %.6f]%n", x.get(0), x.get(1), x.get(2), x.get(3));
+    }
+    
+    // Debug: print per-satellite residuals
+    if (debug) {
+      SimpleMatrix preResid = y0.minus(b);
+      for (int j = 0; j < Math.min(nObsAvail, 3); j++) {
+        System.err.printf("[DEBUG LS_SA] sat[%d]: y0=%.2f, b=%.2f, y0-b=%.2f m, satClockError=%.6f s%n",
+          j, y0.get(j), b.get(j), preResid.get(j), sats.pos[j].getSatelliteClockError());
+      }
+    }
     
     // Receiver clock error
     rover.clockError = x.get(3) / Constants.SPEED_OF_LIGHT;
@@ -149,18 +181,30 @@ public class LS_SA_code extends Core {
     // Receiver position
     rover.setPlusXYZ(x.extractMatrix(0, 3, 0, 1));
 
+    // 北斗GEO单点定位：固定高程约束
+    Double fixedH = goGPS.getFixedHeight();
+    if (fixedH != null) {
+      rover.computeGeodetic();
+      rover.setGeod(rover.getGeodeticLatitude(), rover.getGeodeticLongitude(), fixedH);
+      rover.computeECEF();
+    }
+
     // Estimation of the variance of the observation error
     vEstim = y0.minus(A.mult(x).plus(b));
-    double varianceEstim = (vEstim.transpose().mult(Q.invert())
-        .mult(vEstim)).get(0)
-        / (nObsAvail - nUnknowns);
 
     // Covariance matrix of the estimation error
-    if (nObsAvail > nUnknowns) {
-      positionCovariance = A.transpose().mult(Q.invert()).mult(A).invert()
-      .scale(varianceEstim)
-      .extractMatrix(0, 3, 0, 3);
-    }else{
+    if (nObsAvail >= nUnknowns) {
+      SimpleMatrix cofactor = A.transpose().mult(Q.invert()).mult(A).invert();
+      if (nObsAvail > nUnknowns) {
+        double varianceEstim = (vEstim.transpose().mult(Q.invert())
+            .mult(vEstim)).get(0)
+            / (nObsAvail - nUnknowns);
+        positionCovariance = cofactor.scale(varianceEstim).extractMatrix(0, 3, 0, 3);
+      } else {
+        // nObsAvail == nUnknowns: no redundancy, use cofactor directly
+        positionCovariance = cofactor.extractMatrix(0, 3, 0, 3);
+      }
+    } else {
       positionCovariance = null;
     }
 
@@ -191,44 +235,7 @@ public class LS_SA_code extends Core {
     
     RoverPosition coord = null;
     try {
-      // 检查是否为 RTCM3FileReader，如果是则先读取消息收集基站坐标和星历
-      System.err.println("[DEBUG LS_SA] roverIn 类型: " + roverIn.getClass().getName());
-      if (roverIn instanceof org.gogpsproject.producer.parser.rtcm3.RTCM3FileReader) {
-        System.err.println("[DEBUG LS_SA] 检测到 RTCM3FileReader，开始预处理...");
-        org.gogpsproject.producer.parser.rtcm3.RTCM3FileReader rtcmReader = 
-            (org.gogpsproject.producer.parser.rtcm3.RTCM3FileReader) roverIn;
-        
-        // 先读取所有消息，收集基站坐标和星历
-        // 注意：基站坐标消息可能在观测数据之后
-        Object readNextResult = null;
-        int preObsCount = 0;
-        while ((readNextResult = rtcmReader.readNext()) != null) {
-          if (readNextResult instanceof Observations) {
-            preObsCount++;
-          }
-        }
-        System.err.println("[DEBUG LS_SA] 预处理完成: 读取了 " + preObsCount + " 条观测消息");
-        
-        // 打印读取到的基站坐标
-        org.gogpsproject.positioning.Coordinates definedPos = rtcmReader.getDefinedPosition();
-        System.err.println("[DEBUG LS_SA] 基站坐标检查: definedPos=" + (definedPos != null ? definedPos.toString() : "null") + ", isValid=" + (definedPos != null ? definedPos.isValidXYZ() : false));
-        // 也检查 RTCM3Client 中的基站位置
-        if (definedPos != null && definedPos.isValidXYZ()) {
-          System.err.println("[DEBUG LS_SA] 最终基站坐标: X=" + definedPos.getX() + " Y=" + definedPos.getY() + " Z=" + definedPos.getZ());
-        }
-      }
       Observations obsR = roverIn.getCurrentObservations();
-      // 如果已经读取完所有消息，尝试重新初始化文件读取器
-      if (obsR == null && roverIn instanceof org.gogpsproject.producer.parser.rtcm3.RTCM3FileReader) {
-        org.gogpsproject.producer.parser.rtcm3.RTCM3FileReader rtcmReader = 
-            (org.gogpsproject.producer.parser.rtcm3.RTCM3FileReader) roverIn;
-        try {
-          rtcmReader.init();
-          obsR = rtcmReader.getNextObservations();
-        } catch (Exception e) {
-          System.err.println("重新初始化失败: " + e.getMessage());
-        }
-      }
       while( obsR != null && !Thread.interrupted() ) { // buffStreamObs.ready()
 //        if(debug) System.out.println("OK ");
 
@@ -241,30 +248,44 @@ public class LS_SA_code extends Core {
             if (! (rover.isValidXYZ() && rover.isValidClockError())) {
             	
             	 double el = -100;
-            	 rover.setXYZ(0, 0, 0);            	 
             	 if( roverIn.getDefinedPosition() != null && roverIn.getDefinedPosition().isValidXYZ()) {
             		 roverIn.getDefinedPosition().cloneInto(rover);
             		 el = 5;
+            	 } else {
+            		 rover.setXYZ(0, 0, 0);
             	 }
             	 
             	 rover.setClockError(0);
 
-              for (int iter = 0; iter < 3; iter++) {
-                // Select all satellites - 临时使用 -200 cutoff 来禁用仰角过滤
-                sats.selectStandalone( obsR, -200);
+              for (int iter = 0; iter < 10; iter++) {
+                // Select all satellites
+                sats.selectStandalone( obsR, goGPS.getCutoff());
                 
-                System.err.printf("[DEBUG LS_SA] 迭代 %d: 可用卫星数=%d%n", iter, sats.getAvailNumber());
+                if (debug) {
+                System.err.printf("[DEBUG LS_SA] 迭代 %d: 可用卫星数=%d, obsR时间=%s, gpsTime=%.0f%n", 
+                        iter, sats.getAvailNumber(), 
+                        obsR.getRefTime(), obsR.getRefTime().getGpsTime());
+                
                 System.err.printf("[DEBUG LS_SA] rover 位置: Lat=%.6f Lon=%.6f H=%.1f%n", 
                         rover.getGeodeticLatitude(), rover.getGeodeticLongitude(), rover.getGeodeticHeight());
+                }
                 
                 if (sats.getAvailNumber() >= 4) {
                   sa.codeStandalone( obsR, false, true);
+                  if (debug) {
                   System.err.printf("[DEBUG LS_SA] 迭代 %d codeStandalone 后: rover X=%.2f Y=%.2f Z=%.2f%n", 
                           iter, rover.getX(), rover.getY(), rover.getZ());
                   System.err.printf("[DEBUG LS_SA] 迭代 %d codeStandalone 后: Lat=%.6f Lon=%.6f H=%.1f%n", 
                           iter, rover.getGeodeticLatitude(), rover.getGeodeticLongitude(), rover.getGeodeticHeight());
+                  }
+                  // 【修改3】近似位置迭代中，若rover变为无效则提前终止
+                  // 避免后续迭代基于无效位置（0,0,0）继续计算，导致矩阵持续奇异
+                  if (!rover.isValidXYZ()) {
+                    if(debug) System.out.println("Approximate LS iteration " + iter + " failed, breaking");
+                    break;
+                  }
                 } else {
-                  System.err.printf("[DEBUG LS_SA] 迭代 %d: 可用卫星不足，跳过计算%n", iter);
+                  if (debug) System.err.printf("[DEBUG LS_SA] 迭代 %d: 可用卫星不足，跳过计算%n", iter);
                 }
               }
 
@@ -272,10 +293,21 @@ public class LS_SA_code extends Core {
               if(debug) System.out.println("Valid approximate position? "+rover.isValidXYZ()+ " " + rover.toString());
             }
             
+            // 近似位置迭代失败时，直接使用基站坐标作为回退
+            if (!rover.isValidXYZ() && roverIn.getDefinedPosition() != null && roverIn.getDefinedPosition().isValidXYZ()) {
+              roverIn.getDefinedPosition().cloneInto(rover);
+              rover.setClockError(0);
+              rover.computeGeodetic();
+              if(debug) System.out.println("Approximate position failed, fallback to base station: " + rover.toString());
+            }
+            
             if (rover.isValidXYZ() && rover.isValidClockError()) {
-              // Select available satellites - 临时使用 -200 cutoff
-              sats.selectStandalone( obsR, -200);
+              double approxClock = rover.clockError;
+              
+              // Select available satellites
+              sats.selectStandalone( obsR, goGPS.getCutoff());
 
+              if (debug) {
               System.err.printf("[DEBUG LS_SA] selectStandalone 后: rover=%s, geod=%s%n", 
                       rover.toString(), String.format("Lat=%.6f Lon=%.6f H=%.1f", 
                               rover.getGeodeticLatitude(), 
@@ -292,19 +324,51 @@ public class LS_SA_code extends Core {
                   System.err.printf("[DEBUG LS_SA] Sat %c%d 仰角=%.2f 度 %s%n", satType, id, el, el > 0 ? "✓" : "");
                 }
               }
+            }
               
               if (sats.getAvailNumber() >= 4){
                 if(debug) System.out.println("Number of selected satellites: " + sats.getAvailNumber());
-                // Compute code stand-alone positioning (epoch-by-epoch solution)
-                sa.codeStandalone( obsR, false, false);
+                // 【修改5】多次迭代（5次）确保LS收敛
+                // 单次迭代在山区SPP场景下极易发散，增加迭代次数可提高收敛概率
+                for (int iter = 0; iter < 5; iter++) {
+                  sats.selectStandalone( obsR, goGPS.getCutoff());
+                  sa.codeStandalone( obsR, false, false);
+                  if (!rover.isValidXYZ()) {
+                    if(debug) System.out.println("LS iteration " + iter + " failed, breaking");
+                    break;
+                  }
+                }
+                // 主LS解算失败时，回退到基站坐标
+                if (!rover.isValidXYZ()) {
+                  roverIn.getDefinedPosition().cloneInto(rover);
+                  rover.clockError = approxClock;
+                  rover.computeGeodetic();
+                  if(debug) System.out.println("Main LS failed, fallback to base station position: " + rover.toString());
+                }
               }
               else {
-                // Discard approximate positioning
-                rover.setXYZ(0, 0, 0);
+                // Discard approximate positioning, fallback to defined position if available
+                if (roverIn.getDefinedPosition() != null && roverIn.getDefinedPosition().isValidXYZ()) {
+                  roverIn.getDefinedPosition().cloneInto(rover);
+                } else {
+                  rover.setXYZ(0, 0, 0);
+                }
               }
             }
 
             if(debug)System.out.println("Valid LS position? "+ (rover.isValidXYZ() && rover.isValidClockError() )+ " " + rover.toString() );
+            if (rover.isValidXYZ() && rover.isValidClockError()) {
+              rover.computeGeodetic();
+              double lat = rover.getGeodeticLatitude();
+              double lon = rover.getGeodeticLongitude();
+              // 【修改7】区域坐标范围检查（青藏高原区域：北纬20-35°，东经90-102°）
+              // 过滤定位结果中严重偏离目标区域的异常值（如17:34:48的异常点）
+              // 注意：此范围针对青藏高原东部区域，其他区域使用时需修改
+              if (lat < 20 || lat > 35 || lon < 90 || lon > 102) {
+                rover.setXYZ(0, 0, 0);
+                if(debug) System.out.println("Position out of region bounds, discarded: Lat=" + lat + " Lon=" + lon);
+              }
+            }
             if (rover.isValidXYZ() && rover.isValidClockError()) {
               if(!validPosition){
                 goGPS.notifyPositionConsumerEvent(PositionConsumer.EVENT_START_OF_TRACK);

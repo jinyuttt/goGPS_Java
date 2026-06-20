@@ -23,7 +23,9 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -36,6 +38,7 @@ import org.gogpsproject.ephemeris.EphQzs;
 import org.gogpsproject.ephemeris.EphemerisSystem;
 import org.gogpsproject.positioning.Coordinates;
 import org.gogpsproject.positioning.SatellitePosition;
+import org.gogpsproject.positioning.Time;
 import org.gogpsproject.producer.NavigationProducer;
 import org.gogpsproject.producer.Observations;
 import org.gogpsproject.producer.ObservationsProducer;
@@ -59,16 +62,14 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	private File file;
 	private Observations obs = null;
 	private IonoGps iono = null;
-	// TODO support past times, now keep only last broadcast data
+	// 存储每个卫星的星历列表，支持多星历选择
 	private HashMap<Integer,EphGps> ephsGps = new HashMap<Integer,EphGps>();
 	private HashMap<Integer,EphGlo> ephsGlo = new HashMap<Integer,EphGlo>();
 	private HashMap<Integer,EphGal> ephsGal = new HashMap<Integer,EphGal>();
-	private HashMap<Integer,EphBds> ephsBds = new HashMap<Integer,EphBds>();
+	private HashMap<Integer, List<EphBds>> ephsBds = new HashMap<Integer, List<EphBds>>();  // 存储每个卫星的星历列表
 	private HashMap<Integer,EphQzs> ephsQzs = new HashMap<Integer,EphQzs>();
 	private HashMap<Integer,EphIrnss> ephsIrnss = new HashMap<Integer,EphIrnss>();
 	private int week;
-	private Coordinates stationCoords = null;  // 基站坐标
-	
 	private Vector<StreamEventListener> streamEventListeners = new Vector<StreamEventListener>();
 
 	public RTCM3FileReader(File file, int week) {
@@ -81,22 +82,12 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	 */
 	@Override
 	public Coordinates getDefinedPosition() {
-		// 如果有本地存储的基站坐标，返回基站坐标作为初始位置
-		if (stationCoords != null && stationCoords.isValidXYZ()) {
-			System.out.printf("[DEBUG] 使用本地存储的基站坐标: X=%.4f Y=%.4f Z=%.4f%n",
-					stationCoords.getX(), stationCoords.getY(), stationCoords.getZ());
-			return stationCoords;
-		}
-		// 尝试从 RTCM3Client 获取基站位置
 		if (reader != null && reader.getMasterPosition() != null) {
-			System.out.printf("[DEBUG] 从RTCM3Client获取基站坐标: X=%.4f Y=%.4f Z=%.4f%n",
-					reader.getMasterPosition().getX(), reader.getMasterPosition().getY(), reader.getMasterPosition().getZ());
 			return reader.getMasterPosition();
 		}
-		// 否则返回默认值 (0,0,0)
-		Coordinates coord = Coordinates.globalXYZInstance(0.0, 0.0, 0.0);
-		coord.computeGeodetic();
-		return coord;
+		Coordinates c = Coordinates.globalXYZInstance(0.0, 0.0, 0.0);
+		c.computeGeodetic();
+		return c;
 	}
 
 	/* (non-Javadoc)
@@ -128,9 +119,52 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	 */
 	@Override
 	public void init() throws Exception {
+		scanFileForEphemeris();
 		this.in = new FileInputStream(file);
-
 		this.reader = new RTCM3Client(week);
+	}
+	
+	private void scanFileForEphemeris() throws Exception {
+		FileInputStream scanIn = new FileInputStream(file);
+		RTCM3Client scanReader = new RTCM3Client(week);
+		try {
+			while (scanIn.available() > 0) {
+				int c = scanIn.read();
+				if (c == 211) {
+					Object o = scanReader.readMessage(scanIn);
+					if (o != null) {
+						if (o instanceof EphGlo) {
+							EphGlo eph = (EphGlo) o;
+							ephsGlo.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphBds) {
+							EphBds eph = (EphBds) o;
+							Integer satId = new Integer(eph.getSatID());
+							// 获取卫星的星历列表，如果不存在则创建
+							List<EphBds> ephList = ephsBds.get(satId);
+							if (ephList == null) {
+								ephList = new ArrayList<EphBds>();
+								ephsBds.put(satId, ephList);
+							}
+							ephList.add(eph);
+						} else if (o instanceof EphGal) {
+							EphGal eph = (EphGal) o;
+							ephsGal.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphQzs) {
+							EphQzs eph = (EphQzs) o;
+							ephsQzs.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphIrnss) {
+							EphIrnss eph = (EphIrnss) o;
+							ephsIrnss.put(new Integer(eph.getSatID()), eph);
+						} else if (o instanceof EphGps) {
+							EphGps eph = (EphGps) o;
+							ephsGps.put(new Integer(eph.getSatID()), eph);
+						}
+					}
+				}
+			}
+		} finally {
+			scanIn.close();
+		}
 	}
 
 	/* (non-Javadoc)
@@ -152,9 +186,15 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 						EphGlo eph = (EphGlo)o;
 						ephsGlo.put(new Integer(eph.getSatID()), eph);
 					} else if(o instanceof EphBds){
-						// 存储BeiDou星历数据
+						// 存储BeiDou星历数据（追加到列表）
 						EphBds eph = (EphBds)o;
-						ephsBds.put(new Integer(eph.getSatID()), eph);
+						Integer satId = new Integer(eph.getSatID());
+						List<EphBds> ephList = ephsBds.get(satId);
+						if (ephList == null) {
+							ephList = new ArrayList<EphBds>();
+							ephsBds.put(satId, ephList);
+						}
+						ephList.add(eph);
 					} else if(o instanceof EphGal){
 						// 存储Galileo星历数据
 						EphGal eph = (EphGal)o;
@@ -172,8 +212,7 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 						EphGps eph = (EphGps)o;
 						ephsGps.put(new Integer(eph.getSatID()), eph);
 					} else if(o instanceof Coordinates){
-						// 存储基站坐标
-						stationCoords = (Coordinates) o;
+						// Coordinates already stored in reader.getMasterPosition()
 					}
 				}
 			}
@@ -196,10 +235,6 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 				if (c == 211) { // 0xD3 preamble
 					Object o = reader.readMessage(in);
 					if (o != null) {
-						// 临时调试：打印对象类型
-
-						System.out.printf("[DEBUG readNext] 对象类型: %s%n", o.getClass().getName());
-
 						// 存储星历到 HashMap（与 getNextObservations 保持一致）
 						// 注意：子类必须放在父类 EphGps 之前判断，否则子类对象会匹配到父类分支
 						if (o instanceof EphGlo) {
@@ -207,8 +242,14 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 							ephsGlo.put(new Integer(eph.getSatID()), eph);
 						} else if (o instanceof EphBds) {
 							EphBds eph = (EphBds) o;
-							System.out.println("当前北斗星历数量: " + ephsBds.size());
-							ephsBds.put(new Integer(eph.getSatID()), eph);
+							Integer satId = new Integer(eph.getSatID());
+							List<EphBds> ephList = ephsBds.get(satId);
+							if (ephList == null) {
+								ephList = new ArrayList<EphBds>();
+								ephsBds.put(satId, ephList);
+							}
+							ephList.add(eph);
+							System.out.println("当前北斗星历数量: " + ephsBds.size() + ", PRN=" + eph.getSatID() + ", ToC=" + eph.getToc());
 						} else if (o instanceof EphGal) {
 							EphGal eph = (EphGal) o;
 							ephsGal.put(new Integer(eph.getSatID()), eph);
@@ -222,10 +263,7 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 							EphGps eph = (EphGps) o;
 							ephsGps.put(new Integer(eph.getSatID()), eph);
 						} else if (o instanceof Coordinates) {
-							// 存储基站坐标
-							stationCoords = (Coordinates) o;
-							System.out.printf("[DEBUG] 读取到基站坐标: X=%.4f Y=%.4f Z=%.4f%n",
-									stationCoords.getX(), stationCoords.getY(), stationCoords.getZ());
+							// Coordinates already stored in reader.getMasterPosition()
 						}
 						return o;
 					}
@@ -247,6 +285,12 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 			in.close();
 		} catch (IOException e) {
 			e.printStackTrace();
+		}
+	}
+	
+	public void resetWeekAndTime() {
+		if (reader != null) {
+			reader.resetWeekAndTime();
 		}
 	}
 
@@ -279,15 +323,17 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 				}
 				break;
 			case 'C': // BeiDou
-				EphBds ephBds = ephsBds.get(new Integer(satID));
-				if (ephBds != null) {
-					// 临时调试：打印星历查找成功
-					System.out.printf("[DEBUG] 找到星历: PRN=%d type=%c, rootA=%.0f%n", satID, satType, ephBds.getRootA());
-					return computePositionGps(obs, satID, satType, ephBds, receiverClockError);
-				} else {
-					// 临时调试：打印HashMap大小和key列表
-					System.out.printf("[DEBUG] 未找到星历: PRN=%d type=%c, HashMap大小=%d, keys=%s%n", 
-							satID, satType, ephsBds.size(), ephsBds.keySet());
+				List<EphBds> ephBdsList = ephsBds.get(new Integer(satID));
+				if (ephBdsList != null && !ephBdsList.isEmpty()) {
+					// 获取观测时间（GPST）
+					double obsTimeGPST = obs.getRefTime().getGpsTime();
+					
+					// 选择与观测时间最接近的星历
+					EphBds ephBds = selectBestEphBds(obsTimeGPST, ephBdsList);
+					
+					if (ephBds != null) {
+						return computePositionGps(obs, satID, satType, ephBds, receiverClockError);
+					}
 				}
 				break;
 			case 'J': // QZSS
@@ -306,6 +352,41 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 				break;
 		}
 		return null;
+	}
+
+	/**
+	 * 根据观测时间选择最合适的北斗星历
+	 * 选择规则：
+	 * 1. 使用轨道参考时刻toe匹配（轨道计算的时间基准是toe而非toc）
+	 * 2. 星历有效期为参考时刻前后各2小时，取时间差绝对值最小的星历
+	 * 
+	 * @param obsTimeGPST 观测时间（GPST，单位：秒）
+	 * @param ephList 该卫星的星历列表
+	 * @return 最合适的星历，如果没有有效星历返回null
+	 */
+	private EphBds selectBestEphBds(double obsTimeGPST, List<EphBds> ephList) {
+		EphBds bestEph = null;
+		double minDelta = Double.MAX_VALUE;
+		final double MAX_VALID_DELTA = 7200.0; // 星历有效期：前后各2小时
+		
+		for (EphBds eph : ephList) {
+			double toeGPST = eph.getToe(); // 使用轨道参考时刻toe匹配
+			
+			// 星历有效期为参考时刻前后各2小时，取时间差绝对值最小
+			double delta = Math.abs(obsTimeGPST - toeGPST);
+			
+			if (delta > MAX_VALID_DELTA) {
+				continue;
+			}
+			
+			// 选择时间差绝对值最小的星历（精度最高）
+			if (delta < minDelta) {
+				minDelta = delta;
+				bestEph = eph;
+			}
+		}
+		
+		return bestEph;
 	}
 
 	/* (non-Javadoc)

@@ -44,6 +44,12 @@ public class Coordinates implements Streamable{
 	// Local systems (require to specify an origin)
 	private SimpleMatrix enu; /* Local coordinates (East, North, Up) */
 
+	// UTM projection
+	private double utmEast = Double.NaN;
+	private double utmNorth = Double.NaN;
+	private int utmZone = 0;
+	private boolean utmComputed = false;
+
 	private Time refTime = null;
 
 	protected Coordinates(){
@@ -90,87 +96,60 @@ public class Coordinates implements Streamable{
 		return this.ecef.minus(coord.ecef);
 	}
 	/**
-	 *
+	 * RTKLIB-aligned ecef2pos: convert ECEF (X,Y,Z) to geodetic (lat, lon, h).
+	 * Uses iterative algorithm from RTKLIB rtkcmn.c.
+	 * geod[0]=lon(deg), geod[1]=lat(deg), geod[2]=h(m)
 	 */
 	public void computeGeodetic() {
 		double X = this.ecef.get(0);
 		double Y = this.ecef.get(1);
 		double Z = this.ecef.get(2);
 
-		// 如果 geod 为 null，则初始化
 		if (this.geod == null) {
 			this.geod = new SimpleMatrix(3, 1);
 		}
 
-		double a = Constants.WGS84_SEMI_MAJOR_AXIS;
-		double e = Constants.WGS84_ECCENTRICITY;
+		double e2 = org.gogpsproject.Constants.WGS84_ECCENTRICITY;
+		double r2 = X * X + Y * Y;
+		double z = Z, zk;
+		double v = org.gogpsproject.Constants.WGS84_SEMI_MAJOR_AXIS;
 
-		// Radius computation
-		double r = Math.sqrt(Math.pow(X, 2) + Math.pow(Y, 2) + Math.pow(Z, 2));
+		for (zk = 0.0; Math.abs(z - zk) >= 1E-4;) {
+			zk = z;
+			double sinp = z / Math.sqrt(r2 + z * z);
+			v = org.gogpsproject.Constants.WGS84_SEMI_MAJOR_AXIS / Math.sqrt(1.0 - e2 * sinp * sinp);
+			z = Z + v * e2 * sinp;
+		}
 
-		// Geocentric longitude
-		double lamGeoc = Math.atan2(Y, X);
+		double lat = r2 > 1E-12 ? Math.atan(z / Math.sqrt(r2)) : (Z > 0.0 ? Math.PI / 2.0 : -Math.PI / 2.0);
+		double lon = r2 > 1E-12 ? Math.atan2(Y, X) : 0.0;
+		double h = Math.sqrt(r2 + z * z) - v;
 
-		// Geocentric latitude
-		double phiGeoc = Math.atan(Z / Math.sqrt(Math.pow(X, 2) + Math.pow(Y, 2)));
-
-		// Computation of geodetic coordinates
-		double psi = Math.atan(Math.tan(phiGeoc) / Math.sqrt(1 - Math.pow(e, 2)));
-		double phiGeod = Math.atan((r * Math.sin(phiGeoc) + Math.pow(e, 2) * a
-				/ Math.sqrt(1 - Math.pow(e, 2)) * Math.pow(Math.sin(psi), 3))
-				/ (r * Math.cos(phiGeoc) - Math.pow(e, 2) * a * Math.pow(Math.cos(psi), 3)));
-		double lamGeod = lamGeoc;
-		double N = a / Math.sqrt(1 - Math.pow(e, 2) * Math.pow(Math.sin(phiGeod), 2));
-		double h = r * Math.cos(phiGeoc) / Math.cos(phiGeod) - N;
-
-		this.geod.set(0, 0, Math.toDegrees(lamGeod));
-		this.geod.set(1, 0, Math.toDegrees(phiGeod));
+		this.geod.set(0, 0, Math.toDegrees(lon));
+		this.geod.set(1, 0, Math.toDegrees(lat));
 		this.geod.set(2, 0, h);
 	}
 
-	/*
-	 function [X,Y,Z] = frgeod( a, finv, dphi, dlambda, h )
-	     %FRGEOD  Subroutine to calculate Cartesian coordinates X,Y,Z
-	     %       given geodetic coordinates latitude, longitude (east),
-	     %       and height above reference ellipsoid along with
-	     %       reference ellipsoid values semi-major axis (a) and
-	     %       the inverse of flattening (finv)
-
-	     % The units of linear parameters h,a must agree (m,km,mi,..etc).
-	     % The input units of angular quantities must be in decimal degrees.
-	     % The output units of X,Y,Z will be the same as the units of h and a.
-	     % Copyright (C) 1987 C. Goad, Columbus, Ohio
-	     % Reprinted with permission of author, 1996
-	     % Original Fortran code rewritten into MATLAB
-	     % Kai Borre 03-03-96
+	/**
+	 * RTKLIB-aligned pos2ecef: convert geodetic (lat, lon, h) to ECEF (X,Y,Z).
+	 * geod[0]=lon(deg), geod[1]=lat(deg), geod[2]=h(m)
 	 */
 	public void computeECEF() {
-		final long a = 6378137;
-		final double finv = 298.257223563d;
-
-		double dphi = this.geod.get(1);
-		double dlambda = this.geod.get(0);
+		double lat = Math.toRadians(this.geod.get(1));
+		double lon = Math.toRadians(this.geod.get(0));
 		double h = this.geod.get(2);
 
-		// compute degree-to-radian factor
-		double dtr = Math.PI/180;
+		double sinp = Math.sin(lat);
+		double cosp = Math.cos(lat);
+		double sinl = Math.sin(lon);
+		double cosl = Math.cos(lon);
 
-		// compute square of eccentricity
-		double esq = (2-1/finv)/finv;
-		double sinphi = Math.sin(dphi*dtr);
-		// compute radius of curvature in prime vertical
-		double N_phi = a/Math.sqrt(1-esq*sinphi*sinphi);
+		double e2 = org.gogpsproject.Constants.WGS84_ECCENTRICITY;
+		double v = org.gogpsproject.Constants.WGS84_SEMI_MAJOR_AXIS / Math.sqrt(1.0 - e2 * sinp * sinp);
 
-		// compute P and Z
-		// P is distance from Z axis
-		double P = (N_phi + h)*Math.cos(dphi*dtr);
-		double Z = (N_phi*(1-esq) + h) * sinphi;
-		double X = P*Math.cos(dlambda*dtr);
-		double Y = P*Math.sin(dlambda*dtr);
-
-		this.ecef.set(0, 0, X );
-		this.ecef.set(1, 0, Y );
-		this.ecef.set(2, 0, Z );
+		this.ecef.set(0, 0, (v + h) * cosp * cosl);
+		this.ecef.set(1, 0, (v + h) * cosp * sinl);
+		this.ecef.set(2, 0, (v * (1.0 - e2) + h) * sinp);
 	}
 
 	/**
@@ -231,6 +210,7 @@ public class Coordinates implements Streamable{
 		this.ecef.set(2, 0, z);
 		// 清除 geodetic 缓存，以便下次需要时重新计算
 		this.geod = null;
+		this.utmComputed = false;
 	}
 	public void setGeod( double lat, double lon, double alt ){
 		//if(this.ecef==null) this.ecef = new SimpleMatrix(3, 1);
@@ -239,10 +219,12 @@ public class Coordinates implements Streamable{
 		this.geod.set(2, 0, alt);
 	}
 	public void setPlusXYZ(SimpleMatrix sm){
-		this.ecef.set(ecef.plus(sm));
+		this.ecef.setTo(ecef.plus(sm));
+		this.utmComputed = false;
 	}
 	public void setSMMultXYZ(SimpleMatrix sm){
 		this.ecef = sm.mult(this.ecef);
+		this.utmComputed = false;
 	}
 
 	public boolean isValidXYZ(){
@@ -276,6 +258,10 @@ public class Coordinates implements Streamable{
 		c.ecef = this.ecef.copy();
 		c.enu = this.enu.copy();
 		c.geod = this.geod != null ? this.geod.copy() : null;
+		c.utmEast = this.utmEast;
+		c.utmNorth = this.utmNorth;
+		c.utmZone = this.utmZone;
+		c.utmComputed = this.utmComputed;
 
 		if(refTime!=null) c.refTime = (Time)refTime.clone();
 	}
@@ -307,6 +293,82 @@ public class Coordinates implements Streamable{
 		SimpleMatrix R = new SimpleMatrix(data);
 
 		return R;
+	}
+
+	/**
+	 * RTKLIB ecef2enu: transform ECEF vector to local ENU coordinates.
+	 * @param pos  geodetic position {lat, lon} (rad)
+	 * @param r    vector in ECEF {x, y, z}
+	 * @return     vector in local ENU {e, n, u}
+	 */
+	public static double[] ecef2enu(double[] pos, double[] r) {
+		double sinp = Math.sin(pos[0]), cosp = Math.cos(pos[0]);
+		double sinl = Math.sin(pos[1]), cosl = Math.cos(pos[1]);
+
+		double e = -sinl * r[0] + cosl * r[1];
+		double n = -sinp * cosl * r[0] - sinp * sinl * r[1] + cosp * r[2];
+		double u = cosp * cosl * r[0] + cosp * sinl * r[1] + sinp * r[2];
+
+		return new double[] {e, n, u};
+	}
+
+	/**
+	 * RTKLIB enu2ecef: transform local ENU vector to ECEF coordinates.
+	 * @param pos  geodetic position {lat, lon} (rad)
+	 * @param e    vector in local ENU {e, n, u}
+	 * @return     vector in ECEF {x, y, z}
+	 */
+	public static double[] enu2ecef(double[] pos, double[] e) {
+		double sinp = Math.sin(pos[0]), cosp = Math.cos(pos[0]);
+		double sinl = Math.sin(pos[1]), cosl = Math.cos(pos[1]);
+
+		double x = -sinl * e[0] - sinp * cosl * e[1] + cosp * cosl * e[2];
+		double y = cosl * e[0] - sinp * sinl * e[1] + cosp * sinl * e[2];
+		double z = 0.0 * e[0] + cosp * e[1] + sinp * e[2];
+
+		return new double[] {x, y, z};
+	}
+
+	/**
+	 * RTKLIB covenu: transform ECEF covariance to local ENU covariance.
+	 * Q = E * P * E^T
+	 * @param pos  geodetic position {lat, lon} (rad)
+	 * @param P    covariance in ECEF (3x3 SimpleMatrix)
+	 * @return     covariance in local ENU (3x3 SimpleMatrix)
+	 */
+	public static SimpleMatrix covenu(double[] pos, SimpleMatrix P) {
+		double sinp = Math.sin(pos[0]), cosp = Math.cos(pos[0]);
+		double sinl = Math.sin(pos[1]), cosl = Math.cos(pos[1]);
+
+		double[][] E = new double[3][3];
+		E[0][0] = -sinl;       E[0][1] = cosl;        E[0][2] = 0.0;
+		E[1][0] = -sinp * cosl; E[1][1] = -sinp * sinl; E[1][2] = cosp;
+		E[2][0] = cosp * cosl;  E[2][1] = cosp * sinl;  E[2][2] = sinp;
+
+		SimpleMatrix R = new SimpleMatrix(E);
+		SimpleMatrix EP = R.mult(P);
+		return EP.mult(R.transpose());
+	}
+
+	/**
+	 * RTKLIB covecef: transform local ENU covariance to ECEF covariance.
+	 * P = E^T * Q * E
+	 * @param pos  geodetic position {lat, lon} (rad)
+	 * @param Q    covariance in local ENU (3x3 SimpleMatrix)
+	 * @return     covariance in ECEF (3x3 SimpleMatrix)
+	 */
+	public static SimpleMatrix covecef(double[] pos, SimpleMatrix Q) {
+		double sinp = Math.sin(pos[0]), cosp = Math.cos(pos[0]);
+		double sinl = Math.sin(pos[1]), cosl = Math.cos(pos[1]);
+
+		double[][] E = new double[3][3];
+		E[0][0] = -sinl;       E[0][1] = cosl;        E[0][2] = 0.0;
+		E[1][0] = -sinp * cosl; E[1][1] = -sinp * sinl; E[1][2] = cosp;
+		E[2][0] = cosp * cosl;  E[2][1] = cosp * sinl;  E[2][2] = sinp;
+
+		SimpleMatrix R = new SimpleMatrix(E);
+		SimpleMatrix EQ = R.transpose().mult(Q);
+		return EQ.mult(R);
 	}
 
 	/**
@@ -370,12 +432,88 @@ public class Coordinates implements Streamable{
 
 	}
 
+	/**
+	 * WGS84经纬度 → UTM投影转换
+	 * 使用标准横轴墨卡托投影公式
+	 */
+	public void computeUTM() {
+		if (utmComputed) return;
+
+		double lat = getGeodeticLatitude();
+		double lon = getGeodeticLongitude();
+
+		// WGS84椭球参数
+		double a = 6378137.0;
+		double f = 1.0 / 298.257223563;
+		double k0 = 0.9996;
+		double e = Math.sqrt(2 * f - f * f);
+		double e2 = (e * e) / (1 - e * e);
+
+		// UTM带号
+		utmZone = (int) Math.floor((lon + 180) / 6) + 1;
+		if (utmZone < 1) utmZone = 1;
+		if (utmZone > 60) utmZone = 60;
+
+		// 中央子午线
+		double lon0 = Math.toRadians(utmZone * 6 - 183);
+
+		double latRad = Math.toRadians(lat);
+		double lonRad = Math.toRadians(lon);
+
+		double sinLat = Math.sin(latRad);
+		double cosLat = Math.cos(latRad);
+		double tanLat = Math.tan(latRad);
+
+		double N = a / Math.sqrt(1 - e * e * sinLat * sinLat);
+		double T = tanLat * tanLat;
+		double C = e2 * cosLat * cosLat;
+		double A = cosLat * (lonRad - lon0);
+
+		// 子午线弧长
+		double M = a * ((1 - e * e / 4 - 3 * e * e * e * e / 64 - 5 * e * e * e * e * e * e / 256) * latRad
+				- (3 * e * e / 8 + 3 * e * e * e * e / 32 + 45 * e * e * e * e * e * e / 1024) * Math.sin(2 * latRad)
+				+ (15 * e * e * e * e / 256 + 45 * e * e * e * e * e * e / 1024) * Math.sin(4 * latRad)
+				- (35 * e * e * e * e * e * e / 3072) * Math.sin(6 * latRad));
+
+		// 东向
+		utmEast = k0 * N * (A + (1 - T + C) * A * A * A / 6
+				+ (5 - 18 * T + T * T + 72 * C - 58 * e2) * A * A * A * A * A / 120) + 500000;
+
+		// 北向
+		utmNorth = k0 * (M + N * tanLat * (A * A / 2
+				+ (5 - T + 9 * C + 4 * C * C) * A * A * A * A / 24
+				+ (61 - 58 * T + T * T + 600 * C - 330 * e2) * A * A * A * A * A * A / 720));
+
+		// 南半球加10000km偏移
+		if (lat < 0) {
+			utmNorth += 10000000;
+		}
+
+		utmComputed = true;
+	}
+
+	public double getUTMEasting() {
+		if (!utmComputed) computeUTM();
+		return utmEast;
+	}
+
+	public double getUTMNorthing() {
+		if (!utmComputed) computeUTM();
+		return utmNorth;
+	}
+
+	public int getUTMZone() {
+		if (!utmComputed) computeUTM();
+		return utmZone;
+	}
+
 	public String toString(){
 		String lineBreak = System.getProperty("line.separator");
 
 		String out= String.format( "Coord ECEF: X:"+getX()+" Y:"+getY()+" Z:"+getZ()+lineBreak +
 		"       ENU: E:"+getE()+" N:"+getN()+" U:"+getU()+lineBreak +
 		"      GEOD: Lon:"+getGeodeticLongitude()+" Lat:"+getGeodeticLatitude()+" H:"+getGeodeticHeight()+lineBreak +
+		"      UTM: Zone:"+getUTMZone()+" E:"+getUTMEasting()+" N:"+getUTMNorthing()+lineBreak +
 		"      http://maps.google.com?q=%3.4f,%3.4f" + lineBreak, getGeodeticLatitude(), getGeodeticLongitude() );
 		return out;
 	}

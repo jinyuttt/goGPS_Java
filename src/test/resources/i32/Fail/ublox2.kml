@@ -3,7 +3,7 @@
   <Style id="LineStyle_worst"><LineStyle><color>ff0000ff</color><width>3</width></LineStyle><PolyStyle><color>ff0000ff</color></PolyStyle></Style>
   <Style id="LineStyle_good"><LineStyle><color>ff00ff00</color><width>3</width></LineStyle><PolyStyle><color>ff00ff00</color></PolyStyle></Style>
   <Style id="CircleStyle"><LineStyle><color>88FFCC99</color><width>2</width></LineStyle><PolyStyle><color>88FFCC99</color></PolyStyle></Style>
-  <Style id="dot-icon"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/donut.png</href></Icon></IconStyle></Style>
+  <Style id="dot-icon"><IconStyle><Icon><href>https://storage.googleapis.com/support-kms-prod/SNP_2752129_en_v0</href></Icon><scale>0.3</scale></IconStyle></Style>
   <Folder><Placemark>
     <name></name>
     <description></description>
