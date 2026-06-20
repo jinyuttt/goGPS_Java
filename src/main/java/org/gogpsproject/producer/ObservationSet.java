@@ -40,21 +40,30 @@ public class ObservationSet implements Streamable {
 
 	public final static int L1 = 0;
 	public final static int L2 = 1;
+	public final static int NFREQ = 5; /* max frequency channels (RTKLIB-aligned: BDS needs up to 5) */
 
+	/* RTKLIB obs code per frequency channel.
+	 * Stores the RTKLIB CODE_??? value (e.g. CODE_L2I=40 for B1I, CODE_L6I=42 for B3I)
+	 * so that getWavelength() can compute the exact carrier frequency for the
+	 * signal actually stored in each channel. This is necessary because multiple
+	 * signals can share the same freq-index (e.g. B1I and B1C both map to idx=0
+	 * but have different frequencies: 1561.098 vs 1575.42 MHz).
+	 * 0 means "not set" (fallback to legacy satType+freqIdx logic). */
+	private int[] code = {0,0,0,0,0};
 
 	private int satID;	/* Satellite number */
 	private char satType;	/* Satellite Type */
 
 	private boolean tgdApplied = false;	/* Flag to prevent repeated TGD correction */
 
-	/* Array of [L1,L2] */
-	private double[] codeC = {Double.NaN,Double.NaN};			/* C Coarse/Acquisition (C/A) code [m] */
-	private double[] codeP = {Double.NaN,Double.NaN};			/* P Code Pseudorange [m] */
-	private double[] phase = {Double.NaN,Double.NaN};			/* L Carrier Phase [cycle] */
-	private float[] signalStrength = {Float.NaN,Float.NaN};		/* C/N0 (signal strength) [dBHz] */
-	private float[] doppler = {Float.NaN,Float.NaN};			/* Doppler value [Hz] */
+	/* Array of [L1..L5] */
+	private double[] codeC = {Double.NaN,Double.NaN,Double.NaN,Double.NaN,Double.NaN};			/* C Coarse/Acquisition (C/A) code [m] */
+	private double[] codeP = {Double.NaN,Double.NaN,Double.NaN,Double.NaN,Double.NaN};			/* P Code Pseudorange [m] */
+	private double[] phase = {Double.NaN,Double.NaN,Double.NaN,Double.NaN,Double.NaN};			/* L Carrier Phase [cycle] */
+	private float[] signalStrength = {Float.NaN,Float.NaN,Float.NaN,Float.NaN,Float.NaN};		/* C/N0 (signal strength) [dBHz] */
+	private float[] doppler = {Float.NaN,Float.NaN,Float.NaN,Float.NaN,Float.NaN};			/* Doppler value [Hz] */
 
-	private int[] qualityInd = {-1,-1};	/* Nav Measurements Quality Ind. ublox proprietary? */
+	private int[] qualityInd = {-1,-1,-1,-1,-1};	/* Nav Measurements Quality Ind. ublox proprietary? */
 
 	/*
 	 * Loss of lock indicator (LLI). Range: 0-7
@@ -64,16 +73,16 @@ public class ObservationSet implements Streamable {
 	 *  Bit 2 set : Observation under Antispoofing (may suffer from increased noise)
 	 * Bits 0 and 1 for phase only.
 	 */
-	private int[] lossLockInd = {-1,-1};
+	private int[] lossLockInd = {-1,-1,-1,-1,-1};
 
 	/*
 	 * Signal strength indicator projected into interval 1-9:
 	 *  1: minimum possible signal strength
  	 *  5: threshold for good S/N ratio
  	 *  9: maximum possible signal strength
- 	 * 0 or blank: not known, don't care
+	 * 0 or blank: not known, don't care
 	 */
-	private int[] signalStrengthInd = {-1,-1};
+	private int[] signalStrengthInd = {-1,-1,-1,-1,-1};
 
 	private int freqNum;
 
@@ -134,6 +143,19 @@ public class ObservationSet implements Streamable {
 	}
 
 	public double getWavelength(int i) {
+		/* RTKLIB-aligned: if code[i] is set, compute frequency from the actual
+		 * signal code. This correctly handles cases where multiple signals share
+		 * the same freq-index (e.g. B1I and B1C both at idx=0 but with different
+		 * frequencies: 1561.098 vs 1575.42 MHz). */
+		if (i >= 0 && i < NFREQ && code[i] != 0) {
+			double freq = codeToFrequency(satType, code[i]);
+			if (freq > 0) {
+				return Constants.SPEED_OF_LIGHT / freq;
+			}
+		}
+		/* Fallback: legacy logic based on satType + freqIdx (for backward
+		 * compatibility with RINEX reader and other code paths that don't
+		 * set code[]). */
 		double frequency = 0;
 		switch (this.satType) {
 		case 'G':
@@ -154,6 +176,76 @@ public class ObservationSet implements Streamable {
 		}
 		return Constants.SPEED_OF_LIGHT/frequency;
 	}
+
+	/**
+	 * Convert RTKLIB obs code to carrier frequency (Hz).
+	 * Mirrors RTKLIB's code2freq() / code2freq_BDS() etc.
+	 *
+	 * BeiDou signal expansion (BDS Phase 3/4, pre-2035):
+	 *   idx 0: B1I (1561.098) / B1C (1575.42)
+	 *   idx 1: B2I/B2b (1207.140)
+	 *   idx 2: B2a (1176.450)
+	 *   idx 3: B3I (1268.520)
+	 *   idx 4: B2ab (1191.795)
+	 * New BDS-3/BDS-4 signals should be added here as they are defined in
+	 * RTCM 10410.x and ICD updates.
+	 */
+	private double codeToFrequency(char satType, int code) {
+		String obs = codeToObs(code);
+		if (obs == null || obs.isEmpty()) return 0;
+		char c0 = obs.charAt(0);
+		switch (satType) {
+		case 'G': // GPS
+			if (c0 == '1') return Constants.FL1;
+			if (c0 == '2') return Constants.FL2;
+			if (c0 == '5') return Constants.FL5;
+			break;
+		case 'R': // GLONASS (nominal, fcn-dependent not handled here)
+			if (c0 == '1') return freqNum*Constants.FR1_delta+Constants.FR1_base;
+			if (c0 == '2') return freqNum*Constants.FR2_delta+Constants.FR2_base;
+			break;
+		case 'E': // Galileo
+			if (c0 == '1') return Constants.FE1;
+			if (c0 == '7') return Constants.FE5b;
+			if (c0 == '5') return Constants.FE5a;
+			if (c0 == '6') return Constants.FE6;
+			if (c0 == '8') return Constants.FE5;
+			break;
+		case 'C': // BeiDou (ref RTKLIB code2freq_BDS)
+			if (c0 == '2') return Constants.FC2;   // B1I  1561.098 MHz
+			if (c0 == '1') return Constants.FC1C; // B1C  1575.420 MHz
+			if (c0 == '7') return Constants.FC2b; // B2b  1207.140 MHz
+			if (c0 == '5') return Constants.FC2a; // B2a  1176.450 MHz
+			if (c0 == '6') return Constants.FC6;  // B3I  1268.520 MHz
+			if (c0 == '8') return Constants.FE5;  // B2ab 1191.795 MHz
+			break;
+		case 'J': // QZSS
+			if (c0 == '1') return Constants.FJ1;
+			if (c0 == '2') return Constants.FJ2;
+			if (c0 == '5') return Constants.FJ5;
+			if (c0 == '6') return Constants.FJ6;
+			break;
+		}
+		return 0;
+	}
+
+	/**
+	 * Convert RTKLIB numeric code to 2-char obs string (mirrors RTKLIB code2obs).
+	 * Index matches RTKLIB's obscodes[] table.
+	 */
+	private static final String[] OBSCODES = {
+		""  ,"1C","1P","1W","1Y","1M","1N","1S","1L","1E",  /*  0- 9 */
+		"1A","1B","1X","1Z","2C","2D","2S","2L","2X","2P",  /* 10-19 */
+		"2W","2Y","2M","2N","5I","5Q","5X","7I","7Q","7X",  /* 20-29 */
+		"6A","6B","6C","6X","6Z","6S","6L","8I","8Q","8X",  /* 30-39 */
+		"2I","2Q","6I","6Q","3I","3Q","3X","1I","1Q","5A",  /* 40-49 */
+		"5B","5C","9A","9B","9C","9X","1D","5D","5P","5Z",  /* 50-59 */
+		"6E","7D","7P","7Z","8D","8P","4A","4B","4X",""     /* 60-69 */
+	};
+	private String codeToObs(int code) {
+		if (code < 0 || code >= OBSCODES.length) return "";
+		return OBSCODES[code];
+	}
 	
 	/**
 	 * @return the pseudorange (in meters)
@@ -164,6 +256,23 @@ public class ObservationSet implements Streamable {
 
 	public boolean isPseudorangeP(int i){
 		return !Double.isNaN(codeP[i]);
+	}
+
+	/**
+	 * Get the RTKLIB obs code stored for frequency channel i.
+	 * @return code value (0 if not set)
+	 */
+	public int getCode(int i) {
+		return code[i];
+	}
+
+	/**
+	 * Set the RTKLIB obs code for frequency channel i.
+	 * This enables getWavelength() to compute the exact carrier frequency
+	 * for the signal actually stored in this channel.
+	 */
+	public void setCode(int i, int code) {
+		this.code[i] = code;
 	}
 
 	/**

@@ -1,6 +1,8 @@
 package org.gogpsproject.positioning;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.ejml.simple.SimpleMatrix;
 import org.gogpsproject.GoGPS;
@@ -19,6 +21,20 @@ public class KF_DD_code_phase extends KalmanFilter {
 
   /** RTKLIB-aligned: constraint variance to hold fixed ambiguity (cycle^2) */
   private static final double VAR_HOLDAMB = 0.001;
+
+  /** Holds the fixed DD ambiguity values (per satellite ID) for holdamb constraints.
+   *  Updated in fixAmbiguitiesLambda() when ratio test passes. */
+  private Map<Integer, Double> heldAmbiguities = new HashMap<>();
+
+  /** RTKLIB-aligned base station SPP averaging (POSOPT_SINGLE).
+   *  RTKLIB averages single-point positions over all epochs to get a stable
+   *  reference station coordinate (postpos.c::avepos / rtksvr.c increment).
+   *  These fields accumulate the running mean of the base station SPP.
+   *  Declared static because run() is a static method. */
+  private static double baseSppSumX = 0.0;
+  private static double baseSppSumY = 0.0;
+  private static double baseSppSumZ = 0.0;
+  private static int    baseSppCount = 0;
 
   /** RTKLIB-aligned: ionospheric mapping function single-layer height (m) */
   private static final double IONO_H = 350000.0;
@@ -255,11 +271,19 @@ public class KF_DD_code_phase extends KalmanFilter {
                   satType, id, ddcApp, tropoResiduals, ionoResiduals, antResiduals);
         }
 
-        // Print all sat DD residuals for first epoch
-        if (goGPS.isDebug() && epochCount == 1) {
+        // Print all sat DD residuals for first few epochs (convergence analysis)
+        if (goGPS.isDebug() && epochCount <= 5) {
+          double roverPR  = roverObs.getSatByIDType(id, satType).getPseudorange(0);
+          double masterPR = masterObs.getSatByIDType(id, satType).getPseudorange(0);
+          double roverGeom  = rover.satAppRange[i];
+          double masterGeom = master.satAppRange[i];
+          double sdPR  = roverPR - masterPR;
+          double sdGeom = roverGeom - masterGeom;
           System.err.printf("[DEBUG KF DD] %c%02d: ddcObs=%.2f, appRangeCode=%.2f, res=%.2f, ddpObs=%.2f, appRangePhase=%.2f, phaseRes=%.2f%n",
                   satType, id, ddcObs, appRangeCode, ddcObs - appRangeCode,
                   ddpObs, appRangePhase, ddpObs - appRangePhase);
+          System.err.printf("[DEBUG KF DD DETAIL] %c%02d: roverPR=%.2f masterPR=%.2f sdPR=%.2f | roverGeom=%.2f masterGeom=%.2f sdGeom=%.2f | sdPR-sdGeom=%.2f%n",
+                  satType, id, roverPR, masterPR, sdPR, roverGeom, masterGeom, sdGeom, sdPR - sdGeom);
         }
 
         // L1 code noise
@@ -512,6 +536,22 @@ public class KF_DD_code_phase extends KalmanFilter {
             H.get(row, 0), H.get(row, i1 + 1), H.get(row, i2 + 1),
             Cnn.get(row, row));
       }
+    }
+
+    // Print pivot satellite raw values + baseline for convergence analysis
+    if (goGPS.isDebug() && epochCount <= 5) {
+      double pivotRoverGeom  = rover.satAppRange[sats.pivot];
+      double pivotMasterGeom = master.satAppRange[sats.pivot];
+      System.err.printf("[DEBUG KF PIVOT] %c%02d: roverPR=%.2f masterPR=%.2f sdPR=%.2f | roverGeom=%.2f masterGeom=%.2f sdGeom=%.2f | sdPR-sdGeom=%.2f%n",
+              satType, pivotId, roverPivotCodeObs, masterPivotCodeObs, roverPivotCodeObs - masterPivotCodeObs,
+              pivotRoverGeom, pivotMasterGeom, pivotRoverGeom - pivotMasterGeom,
+              (roverPivotCodeObs - masterPivotCodeObs) - (pivotRoverGeom - pivotMasterGeom));
+      double baseLen = Math.sqrt(Math.pow(rover.getX()-masterPos.getX(),2)
+                               + Math.pow(rover.getY()-masterPos.getY(),2)
+                               + Math.pow(rover.getZ()-masterPos.getZ(),2));
+      System.err.printf("[DEBUG KF PIVOT] rover=[%.2f,%.2f,%.2f] master=[%.2f,%.2f,%.2f] baseline=%.2fm%n",
+              rover.getX(), rover.getY(), rover.getZ(),
+              masterPos.getX(), masterPos.getY(), masterPos.getZ(), baseLen);
     }
 
     updateDops(A);
@@ -1213,6 +1253,7 @@ public class KF_DD_code_phase extends KalmanFilter {
       // Fix ambiguities: update KFstate with fixed integer values
       for (int i = 0; i < nb; i++) {
         KFstate.set(i3 + satIds[i], 0, F[i]); // F[i] = first (best) candidate
+        heldAmbiguities.put(satIds[i], F[i]); // save for holdamb constraint target
       }
 
       // Conditional covariance update (RTKLIB-aligned: resamb_LAMBDA)
@@ -1328,7 +1369,10 @@ public class KF_DD_code_phase extends KalmanFilter {
       if (id == pivotId) continue;
       int idx = i3 + id;
       H_hold.set(nv, idx, 1.0);
-      v_hold.set(nv, 0, 0.0);
+      // Constraint target: the fixed integer value (not 0).
+      // Falls back to current state if no fixed value recorded yet.
+      Double fixedVal = heldAmbiguities.get(id);
+      v_hold.set(nv, 0, (fixedVal != null) ? fixedVal : KFstate.get(idx));
       R_hold.set(nv, nv, VAR_HOLDAMB);
       nv++;
     }
@@ -1386,57 +1430,23 @@ public class KF_DD_code_phase extends KalmanFilter {
       Observations obsR = roverIn.getNextObservations();
       Observations obsM = masterIn.getNextObservations();
 
-      // SPP fallback: if no valid base station position (no 1005/1006 message),
-      // run single point positioning on base station observations
-      if (obsM != null && obsM.getNumSat() >= 4) {
-        Coordinates masterCoord = masterIn.getDefinedPosition();
-        if (debug) System.err.println("[KF_DD run] masterIn.getDefinedPosition()=[" +
-            (masterCoord != null ? masterCoord.getX() + ", " + masterCoord.getY() + ", " + masterCoord.getZ() : "null") + "]");
-        if (masterCoord == null || !masterCoord.isValidXYZ() ||
-            (masterCoord.getX() == 0 && masterCoord.getY() == 0 && masterCoord.getZ() == 0)) {
-          if (debug) System.out.println("[SPP] No valid base station position (no 1005/1006 msg), running SPP...");
-
-          // Save rover position (will be restored after SPP)
-          double origRoverX = rover.getX(), origRoverY = rover.getY(), origRoverZ = rover.getZ();
-          double origRoverClk = rover.getClockError();
-
-          // Run iterative SPP on base station observations
-          rover.setXYZ(0, 0, 0);
-          rover.setClockError(0);
-          double prevX = 0, prevY = 0, prevZ = 0;
-          for (int iter = 0; iter < 10; iter++) {
-            sats.selectStandalone(obsM, goGPS.getCutoff());
-            if (sats.getAvailNumber() >= 4) {
-              kf.codeStandalone(obsM, false, true);
-            }
-            if (rover.isValidXYZ() && iter > 0) {
-              double dx = rover.getX() - prevX;
-              double dy = rover.getY() - prevY;
-              double dz = rover.getZ() - prevZ;
-              if (Math.sqrt(dx*dx + dy*dy + dz*dz) < 100) {
-                if (debug) System.out.println("[SPP] Base station SPP converged at iter " + (iter + 1));
-                break;
-              }
-            }
-            prevX = rover.getX();
-            prevY = rover.getY();
-            prevZ = rover.getZ();
-          }
-
-          if (rover.isValidXYZ() && (prevX != 0 || prevY != 0 || prevZ != 0)) {
-            masterCoord = Coordinates.globalXYZInstance(rover.getX(), rover.getY(), rover.getZ());
-            masterCoord.computeGeodetic();
-            goGPS.setMasterPos(masterCoord);
-            if (debug) System.out.println("[SPP] Base station SPP result: X=" + String.format("%.4f", rover.getX()) +
-                " Y=" + String.format("%.4f", rover.getY()) + " Z=" + String.format("%.4f", rover.getZ()));
-          } else {
-            if (debug) System.out.println("[SPP] Base station SPP failed, using (0,0,0)");
-          }
-
-          // Restore rover position
-          rover.setXYZ(origRoverX, origRoverY, origRoverZ);
-          rover.setClockError(origRoverClk);
-        }
+      // RTKLIB-aligned base station coordinate handling (POSOPT_SINGLE).
+      //
+      // RTKLIB (postpos.c::antpos -> avepos) computes the reference station
+      // position by running single-point positioning on EVERY base epoch and
+      // averaging the results, then uses that fixed average for the whole run.
+      // Because goGPS reads the RTCM stream sequentially (no reset/rewind), we
+      // reproduce the same effect with a running mean: each matched epoch runs
+      // SPP on the base observations and accumulates into baseSppSum*/baseSppCount.
+      //
+      // basePos is the coordinate used CONSISTENTLY everywhere (geometry in
+      // selectDoubleDiff, kf.init/loop, output guard). It starts from the 1005
+      // message (if any) as a fallback, and is refreshed every epoch with the
+      // latest running mean once at least one SPP has succeeded.
+      Coordinates basePos = masterIn.getDefinedPosition();
+      if (debug && basePos != null) {
+        System.err.println("[KF_DD run] masterIn.getDefinedPosition() (1005/1006) =[" +
+            basePos.getX() + ", " + basePos.getY() + ", " + basePos.getZ() + "]");
       }
 
       // SKIP_DUP_MARKER: 同一历元多条MSM消息会产生重复Observations，此处跳过已处理的时间戳
@@ -1457,6 +1467,7 @@ public class KF_DD_code_phase extends KalmanFilter {
         // Discard master epochs that are behind rover by more than tolerance
         while (obsM != null && obsR != null
             && (obsR.getRefTime().getMsec() - obsM.getRefTime().getMsec()) > maxTimeDiffMs) {
+          if(debug) System.out.println("  [match] master behind, skip M="+obsM.getRefTime().getMsec());
           obsM = masterIn.getNextObservations();
         }
         if (obsM == null) {
@@ -1467,6 +1478,7 @@ public class KF_DD_code_phase extends KalmanFilter {
         // Discard rover epochs that are behind master by more than tolerance
         while (obsM != null && obsR != null
             && (obsM.getRefTime().getMsec() - obsR.getRefTime().getMsec()) > maxTimeDiffMs) {
+          if(debug) System.out.println("  [match] rover behind, skip R="+obsR.getRefTime().getMsec());
           obsR = roverIn.getNextObservations();
         }
         if (obsR == null) {
@@ -1474,10 +1486,19 @@ public class KF_DD_code_phase extends KalmanFilter {
           break;
         }
 
+        if(debug) System.out.println("  [matched] R="+obsR.getRefTime().getMsec()+" M="+obsM.getRefTime().getMsec());
+
         // SKIP_DUP_MARKER: 跳过同一历元的重复MSM消息
+        // 注意：只跳过 rover 的重复，master 不动（避免 master 被错误推进导致历元错位）
+        // 如果 master 也有重复，下面的时间匹配逻辑会自动处理
         if (obsR != null && obsR.getRefTime().getMsec() == lastEpochTime) {
-          if (debug) System.out.println("[Skip] Duplicate epoch: " + obsR.getRefTime());
+          if (debug) System.out.println("[Skip] Duplicate rover epoch: " + obsR.getRefTime());
           obsR = roverIn.getNextObservations();
+          continue;
+        }
+        // 如果 master 时间戳与上一历元相同（master 重复），跳过 master 的重复
+        if (obsM != null && obsM.getRefTime().getMsec() == lastEpochTime) {
+          if (debug) System.out.println("[Skip] Duplicate master epoch: " + obsM.getRefTime());
           obsM = masterIn.getNextObservations();
           continue;
         }
@@ -1488,6 +1509,72 @@ public class KF_DD_code_phase extends KalmanFilter {
           timeRead = System.currentTimeMillis() - timeRead;
           depRead = depRead + timeRead;
           timeProc = System.currentTimeMillis();
+
+          // RTKLIB-aligned: per-epoch base station SPP with running mean.
+          // Mirrors RTKLIB postpos.c::avepos (average SPP over all epochs) and
+          // rtksvr.c (incremental running mean). Each matched epoch runs SPP on
+          // the base observations and accumulates into baseSppSum*/baseSppCount;
+          // basePos is then refreshed to the latest running mean so that the
+          // geometry (selectDoubleDiff), kf.init/loop and output guard all use
+          // the same averaged coordinate consistently.
+          if (obsM.getNumSat() >= 4) {
+            // Save rover state (SPP on base temporarily reuses the rover object)
+            double origRoverX = rover.getX(), origRoverY = rover.getY(), origRoverZ = rover.getZ();
+            double origRoverClk = rover.getClockError();
+
+            // Iterative SPP on base station observations.
+            // cutoff=-100 avoids filtering satellites when starting from (0,0,0),
+            // matching the rover SPP pattern below.
+            rover.setXYZ(0, 0, 0);
+            rover.setClockError(0);
+            double prevX = 0, prevY = 0, prevZ = 0;
+            for (int iter = 0; iter < 10; iter++) {
+              sats.selectStandalone(obsM, -100);
+              if (sats.getAvailNumber() >= 4) {
+                kf.codeStandalone(obsM, false, true);
+              }
+              if (rover.isValidXYZ() && iter > 0) {
+                double dx = rover.getX() - prevX;
+                double dy = rover.getY() - prevY;
+                double dz = rover.getZ() - prevZ;
+                if (Math.sqrt(dx*dx + dy*dy + dz*dz) < 100) {
+                  break; // converged
+                }
+              }
+              prevX = rover.getX();
+              prevY = rover.getY();
+              prevZ = rover.getZ();
+            }
+
+            // Accumulate valid SPP result into the running mean (RTKLIB avepos)
+            if (rover.isValidXYZ() && (prevX != 0 || prevY != 0 || prevZ != 0)) {
+              baseSppCount++;
+              // incremental mean: mean += (x - mean) / n
+              double n = baseSppCount;
+              double meanX = baseSppSumX + (rover.getX() - baseSppSumX) / n;
+              double meanY = baseSppSumY + (rover.getY() - baseSppSumY) / n;
+              double meanZ = baseSppSumZ + (rover.getZ() - baseSppSumZ) / n;
+              baseSppSumX = meanX;
+              baseSppSumY = meanY;
+              baseSppSumZ = meanZ;
+
+              // Refresh basePos to the averaged coordinate (consistent everywhere)
+              Coordinates avgCoord = Coordinates.globalXYZInstance(meanX, meanY, meanZ);
+              avgCoord.computeGeodetic();
+              goGPS.setMasterPos(avgCoord);
+              basePos = avgCoord;
+
+              if (debug) System.out.println("[SPP] Base SPP epoch " + baseSppCount +
+                  ": instant=[" + String.format("%.2f", rover.getX()) + "," +
+                  String.format("%.2f", rover.getY()) + "," + String.format("%.2f", rover.getZ()) +
+                  "] avg=[" + String.format("%.4f", meanX) + "," +
+                  String.format("%.4f", meanY) + "," + String.format("%.4f", meanZ) + "]");
+            }
+
+            // Restore rover state
+            rover.setXYZ(origRoverX, origRoverY, origRoverZ);
+            rover.setClockError(origRoverClk);
+          }
 
           try {
             // If Kalman filter was not initialized and if there are at least four satellites
@@ -1540,8 +1627,8 @@ public class KF_DD_code_phase extends KalmanFilter {
               double h = rover.getGeodeticHeight();
               if (Math.abs(h) > 10000) {
                 if(debug) System.out.println("[Init] Height out of range: " + String.format("%.1f", h) + "m, reject init");
-                if (masterIn.getDefinedPosition() != null) {
-                  masterIn.getDefinedPosition().cloneInto(rover);
+                if (basePos != null) {
+                  basePos.cloneInto(rover);
                   if(debug) System.out.println("[Init] Fallback to base station position: " +
                       String.format("%.1f, %.1f, %.1f", rover.getX(), rover.getY(), rover.getZ()));
                 } else {
@@ -1554,7 +1641,7 @@ public class KF_DD_code_phase extends KalmanFilter {
             if (rover.isValidXYZ()) {
               
               // Initialize Kalman filter
-              kf.init(obsR, obsM, masterIn.getDefinedPosition());
+              kf.init(obsR, obsM, basePos);
 
               if (rover.isValidXYZ()) {
                 kalmanInitialized = true;
@@ -1565,12 +1652,12 @@ public class KF_DD_code_phase extends KalmanFilter {
             }else{
               if(debug) System.out.println("A-priori position (from code observations) is not valid.");
               // Fallback: use base station position for short-baseline RTK
-              if (masterIn.getDefinedPosition() != null) {
-                masterIn.getDefinedPosition().cloneInto(rover);
+              if (basePos != null) {
+                basePos.cloneInto(rover);
                 if(debug) System.out.println("[Init] Fallback to base station position (SPP failed): " +
                     String.format("%.1f, %.1f, %.1f", rover.getX(), rover.getY(), rover.getZ()));
                 // Retry Kalman filter initialization with base position
-                kf.init(obsR, obsM, masterIn.getDefinedPosition());
+                kf.init(obsR, obsM, basePos);
                 if (rover.isValidXYZ()) {
                   kalmanInitialized = true;
                   if(debug) System.out.println("Kalman filter initialized (base station fallback).");
@@ -1581,7 +1668,7 @@ public class KF_DD_code_phase extends KalmanFilter {
 
             // Do a Kalman filter loop
             try{
-              kf.loop(obsR,obsM, masterIn.getDefinedPosition());
+              kf.loop(obsR,obsM, basePos);
             }catch(Exception e){
               e.printStackTrace();
               valid = false;
@@ -1599,14 +1686,14 @@ public class KF_DD_code_phase extends KalmanFilter {
                 && !(rover.getX() == 0 && rover.getY() == 0 && rover.getZ() == 0);
 
             // Check distance from base station (RTK short baseline guard)
-            if (coordValid && masterIn.getDefinedPosition() != null) {
-              double dx = rover.getX() - masterIn.getDefinedPosition().getX();
-              double dy = rover.getY() - masterIn.getDefinedPosition().getY();
-              double dz = rover.getZ() - masterIn.getDefinedPosition().getZ();
+            if (coordValid && basePos != null) {
+              double dx = rover.getX() - basePos.getX();
+              double dy = rover.getY() - basePos.getY();
+              double dz = rover.getZ() - basePos.getZ();
               double distFromBase = Math.sqrt(dx*dx + dy*dy + dz*dz);
               if (debug) System.err.printf("[Output guard] rover=[%.2f,%.2f,%.2f] base=[%.2f,%.2f,%.2f] dist=%.1fm%n",
                   rover.getX(), rover.getY(), rover.getZ(),
-                  masterIn.getDefinedPosition().getX(), masterIn.getDefinedPosition().getY(), masterIn.getDefinedPosition().getZ(),
+                  basePos.getX(), basePos.getY(), basePos.getZ(),
                   distFromBase);
               if (distFromBase > goGPS.getMaxDivergenceDistance()) {
                 if(debug) System.out.println("[Output guard] Rover too far from base: " + String.format("%.1f", distFromBase/1000) + "km, skip output");

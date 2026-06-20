@@ -6,6 +6,7 @@ import java.util.Map;
 
 import org.ejml.simple.SimpleMatrix;
 import org.gogpsproject.Constants;
+import org.gogpsproject.RtkLibConstants;
 import org.gogpsproject.GoGPS;
 import org.gogpsproject.Status;
 import org.gogpsproject.producer.NavigationProducer;
@@ -498,9 +499,24 @@ public class Satellites {
     	  	
         // Compute rover-satellite approximate pseudorange
         rover.diffSat[i] = rover.minusXYZ(pos[i]);
-        rover.satAppRange[i] = Math.sqrt(Math.pow(rover.diffSat[i].get(0), 2)
+        double geomRange = Math.sqrt(Math.pow(rover.diffSat[i].get(0), 2)
             + Math.pow(rover.diffSat[i].get(1), 2)
             + Math.pow(rover.diffSat[i].get(2), 2));
+
+        // Sagnac (earth rotation) correction - RTKLIB-aligned.
+        // RTKLIB geodist() returns r + OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT.
+        // Without this, SPP has a systematic bias of tens of meters.
+        double sagnac = RtkLibConstants.OMGE
+            * (pos[i].getX() * rover.getY() - pos[i].getY() * rover.getX())
+            / Constants.SPEED_OF_LIGHT;
+        rover.satAppRange[i] = geomRange + sagnac;
+
+        if (goGPS.isDebug()) {
+          System.err.printf("[SATRNG] sat=%c%d geom=%.3f sagnac=%.3f range=%.3f rcv=[%.1f,%.1f,%.1f] sat=[%.1f,%.1f,%.1f]%n",
+              satType, id, geomRange, sagnac, rover.satAppRange[i],
+              rover.getX(), rover.getY(), rover.getZ(),
+              pos[i].getX(), pos[i].getY(), pos[i].getZ());
+        }
 
         // Compute azimuth, elevation and distance for each satellite
         rover.topo[i] = new TopocentricCoordinates();
@@ -617,6 +633,17 @@ public class Satellites {
         master.satAppRange[i] = Math.sqrt(Math.pow(master.diffSat[i].get(0), 2)
                               + Math.pow(master.diffSat[i].get(1), 2)
                               + Math.pow(master.diffSat[i].get(2), 2));
+
+        // Sagnac (earth rotation) correction - RTKLIB-aligned.
+        // RTKLIB geodist() returns r + OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT.
+        // Applied to both rover and master geometric ranges so that DD
+        // geometry (sdGeom) is consistent with RTKLIB.
+        rover.satAppRange[i] += RtkLibConstants.OMGE
+            * (pos[i].getX() * rover.getY() - pos[i].getY() * rover.getX())
+            / Constants.SPEED_OF_LIGHT;
+        master.satAppRange[i] += RtkLibConstants.OMGE
+            * (pos[i].getX() * masterPos.getY() - pos[i].getY() * masterPos.getX())
+            / Constants.SPEED_OF_LIGHT;
 
         // Compute azimuth, elevation and distance for each satellite from rover
         rover.topo[i] = new TopocentricCoordinates();

@@ -294,4 +294,32 @@ public class Observations implements Streamable {
 	public void sortBySatID() {
 			obsSet.sort( (o1,o2)-> o1.getSatID() - o2.getSatID());
 	}
+
+	/**
+	 * 合并同一历元的另一组观测值（RTKLIB-style 累积）。
+	 * 当多条 MSM 消息属于同一历元（时间戳相同）时，将 other 中的卫星观测值
+	 * 追加到当前 Observations 中。如果卫星已存在则跳过（不覆盖）。
+	 *
+	 * @param other 同一历元的另一组观测值
+	 */
+	public void mergeObservations(Observations other) {
+		if (other == null || other.obsSet == null) return;
+		if (this.obsSet == null) this.obsSet = new ArrayList<ObservationSet>();
+		for (ObservationSet os : other.obsSet) {
+			if (os == null) continue;
+			// 检查是否已存在相同卫星（按 satID + satType 判重）
+			boolean exists = false;
+			for (ObservationSet existing : this.obsSet) {
+				if (existing != null
+						&& existing.getSatID() == os.getSatID()
+						&& existing.getSatType() == os.getSatType()) {
+					exists = true;
+					break;
+				}
+			}
+			if (!exists) {
+				this.obsSet.add(os);
+			}
+		}
+	}
 }

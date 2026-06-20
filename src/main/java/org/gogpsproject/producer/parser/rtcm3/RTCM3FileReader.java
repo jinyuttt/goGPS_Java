@@ -61,6 +61,12 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 	private RTCM3Client reader;
 	private File file;
 	private Observations obs = null;
+	/**
+	 * 当前历元累积中的 Observations（RTKLIB-style 累积）。
+	 * 多条 MSM 消息属于同一历元（时间戳相同）时，合并到此对象，
+	 * 直到遇到不同时间戳的消息时才返回完整历元。
+	 */
+	private Observations pendingObs = null;
 	private IonoGps iono = null;
 	// 存储每个卫星的星历列表，支持多星历选择
 	private HashMap<Integer,EphGps> ephsGps = new HashMap<Integer,EphGps>();
@@ -179,8 +185,23 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 				if (c == 211) {
 					Object o = reader.readMessage(in);
 					if(o instanceof Observations){
-						this.obs = (Observations)o;  // 更新当前观测数据
-						return (Observations)o;
+						Observations newObs = (Observations)o;
+						long newTime = newObs.getRefTime().getMsec();
+
+						if (pendingObs == null) {
+							// 第一条消息，开始累积
+							pendingObs = newObs;
+						} else if (newObs.getRefTime() != null
+								&& newTime == pendingObs.getRefTime().getMsec()) {
+							// 同一历元，合并卫星观测值（RTKLIB-style 累积）
+							pendingObs.mergeObservations(newObs);
+						} else {
+							// 新历元开始，返回当前累积的完整历元，缓存新消息
+							this.obs = pendingObs;
+							Observations result = pendingObs;
+							pendingObs = newObs;
+							return result;
+						}
 					} else if(o instanceof EphGlo){
 						// 存储GLONASS星历数据
 						EphGlo eph = (EphGlo)o;
@@ -215,6 +236,13 @@ public class RTCM3FileReader extends EphemerisSystem implements ObservationsProd
 						// Coordinates already stored in reader.getMasterPosition()
 					}
 				}
+			}
+			// 文件结束，返回最后累积的历元
+			if (pendingObs != null) {
+				this.obs = pendingObs;
+				Observations result = pendingObs;
+				pendingObs = null;
+				return result;
 			}
 		}catch(IOException e){
 			e.printStackTrace();

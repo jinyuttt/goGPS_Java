@@ -42,7 +42,7 @@ import org.ejml.simple.SimpleMatrix;
 
 public abstract class EphemerisSystem {
 
-	
+	private static boolean debugSatPosLogged = true;
 	
 //	double[] pos ;
 	
@@ -134,25 +134,39 @@ public abstract class EphemerisSystem {
 
 					// BDS GEO satellites: PRN 1-5 (BDS-2), PRN 59-63 (BDS-3)
 					// Reference: BDS-SIS-ICD-B1I-3.0, RTKLIB ephemeris.c eph2pos()
-					// Only Omega formula differs from non-GEO; ECEF conversion is identical
 					if (satID <= 5 || satID >= 59) {
-						// GEO: Ω_k = Ω₀ + Ω̇ * t_k - ω_e * t_oe
+						// GEO: Ω_k = Ω₀ + Ω̇ * t_k - ω_e * t_oe (BDT)
+						// RTKLIB uses BDT toes (not GPST) in omge*toes term
+						double toes = eph.getToe() - RtkLibConstants.BDS_TIME_OFFSET;
 						double Omega = eph.getOmega0()
 								+ eph.getOmegaDot() * tk
-								- Constants.OMEGAE_DOT_BDS * eph.getToe();
+								- Constants.OMEGAE_DOT_BDS * toes;
 						Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
 
-						// Standard ECEF conversion (same as non-GEO)
-						double X = x1 * Math.cos(Omega) - y1 * Math.cos(ik) * Math.sin(Omega);
-						double Y = x1 * Math.sin(Omega) + y1 * Math.cos(ik) * Math.cos(Omega);
-						double Z = y1 * Math.sin(ik);
+						double cosO = Math.cos(Omega);
+						double sinO = Math.sin(Omega);
+						double cosi = Math.cos(ik);
+						double sini = Math.sin(ik);
+
+						double xg = x1 * cosO - y1 * cosi * sinO;
+						double yg = x1 * sinO + y1 * cosi * cosO;
+						double zg = y1 * sini;
+
+						double sino = Math.sin(Constants.OMEGAE_DOT_BDS * tk);
+						double coso = Math.cos(Constants.OMEGAE_DOT_BDS * tk);
+
+						double X =  xg * coso + yg * sino * RtkLibConstants.COS_5 + zg * sino * RtkLibConstants.SIN_5;
+						double Y = -xg * sino + yg * coso * RtkLibConstants.COS_5 + zg * coso * RtkLibConstants.SIN_5;
+						double Z = -yg * RtkLibConstants.SIN_5 + zg * RtkLibConstants.COS_5;
 
 						sp = new SatellitePosition(unixTime, satID, satType, X, Y, Z);
 					} else {
-						// Non-GEO: Ω_k = Ω₀ + (Ω̇ - ω_e) * t_k - ω_e * t_oe
+						// Non-GEO: Ω_k = Ω₀ + (Ω̇ - ω_e) * t_k - ω_e * t_oe (BDT)
+						// RTKLIB uses BDT toes (not GPST) in omge*toes term
+						double toes = eph.getToe() - RtkLibConstants.BDS_TIME_OFFSET;
 						double Omega = eph.getOmega0()
 								+ (eph.getOmegaDot() - Constants.OMEGAE_DOT_BDS) * tk
-								- Constants.OMEGAE_DOT_BDS * eph.getToe();
+								- Constants.OMEGAE_DOT_BDS * toes;
 						Omega = Math.IEEEremainder(Omega + 2 * Math.PI, 2 * Math.PI);
 
 						sp = new SatellitePosition(unixTime, satID, satType,
@@ -162,6 +176,17 @@ public abstract class EphemerisSystem {
 					}
 
 					sp.setSatelliteClockError(satelliteClockError);
+
+					if (debugSatPosLogged) {
+						double Xdbg = sp.getX();
+						double Ydbg = sp.getY();
+						double Zdbg = sp.getZ();
+						System.err.printf("[SATCMP] sat=C%02d tk=%.3f Ek=%.6f X=%13.3f Y=%13.3f Z=%13.3f dts=%12.3f ns%n",
+								satID, tk, Ek, Xdbg, Ydbg, Zdbg, satelliteClockError * 1E9);
+						System.err.printf("[SATCMP2] sat=C%02d i0=%.8f idot=%.3e ik=%.8f Omega0=%.8f OmegaDot=%.3e u=%.8f r=%.3f toe=%.1f tGPS=%.1f%n",
+								satID, Math.toDegrees(eph.getI0()), eph.getiDot(), Math.toDegrees(ik),
+								Math.toDegrees(eph.getOmega0()), eph.getOmegaDot(), Math.toDegrees(u), r, eph.getToe(), transmitTimeGPST);
+					}
 
 					// Apply the correction due to the Earth rotation during signal travel time
 					SimpleMatrix R = computeEarthRotationCorrection(unixTime, receiverClockError, transmitTimeGPST, satType);

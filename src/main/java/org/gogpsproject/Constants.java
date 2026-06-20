@@ -91,10 +91,13 @@ public class Constants {
 	public static final double FE5  = 1191.795e6;
 	public static final double FE6  = 1278.750e6;
 	
-	public static final double FC1  = 1589.740e6; // BeiDou
-	public static final double FC2  = 1561.098e6;
+	public static final double FC1  = 1589.740e6; // BeiDou B1
+	public static final double FC2  = 1561.098e6; // BeiDou B1I (BDS-2)
+	public static final double FC1C = 1575.420e6; // BeiDou B1C (BDS-3, same as GPS L1)
+	public static final double FC2b = 1207.140e6; // BeiDou B2b/B2I
+	public static final double FC2a = 1176.450e6; // BeiDou B2a (same as GPS L5)
 	public static final double FC5b = FE5b;
-	public static final double FC6  = 1268.520e6;
+	public static final double FC6  = 1268.520e6; // BeiDou B3I
 	
 	public static final double FJ1  = FL1; // QZSS
 	public static final double FJ2  = FL2;

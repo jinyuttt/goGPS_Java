@@ -10,8 +10,8 @@ import org.gogpsproject.producer.Observations;
 
 public abstract class KalmanFilter extends LS_DD_code {
 
-  /** Initial position st dev (m) */
-  private static final double stDevInit = 1;
+  /** Initial position st dev (m), RTKLIB-aligned: VAR_POS = SQR(30.0) in rtkpos.c */
+  private static final double stDevInit = 30;
 
   /** East velocity process noise st dev (m/s^2) */
   private static final double stDevE = 0.6;
@@ -270,23 +270,15 @@ public abstract class KalmanFilter extends LS_DD_code {
     KFprediction = T.mult(KFstate);
   
     // Covariance matrix of the initial state
-    // When DD diverged, SPP position is uncertain (~100km), use large initial covariance
-    double initPosVar = ddDiverged ? Math.pow(maxDivDist, 2) : Math.pow(stDevInit, 2);
-    if(positionCovariance != null) {
-      // Full copy of 3x3 position covariance matrix (RTKLIB-aligned: preserve off-diagonal terms)
-      for (int row = 0; row < 3; row++) {
-        for (int col = 0; col < 3; col++) {
-          int kr = (row == 0) ? 0 : (row == 1) ? (i1 + 1) : (i2 + 1);
-          int kc = (col == 0) ? 0 : (col == 1) ? (i1 + 1) : (i2 + 1);
-          Cee.set(kr, kc, positionCovariance.get(row, col));
-        }
-      }
-    } else {
-      positionCovariance = new SimpleMatrix(3, 3);
-      Cee.set(0, 0, initPosVar);
-      Cee.set(i1 + 1, i1 + 1, initPosVar);
-      Cee.set(i2 + 1, i2 + 1, initPosVar);
-    }
+    // RTKLIB-aligned: always use VAR_POS = SQR(30.0) = 900 m², regardless of DD convergence.
+    // RTKLIB never uses SPP covariance (sol->qr) in the RTK filter; it always initializes
+    // position with VAR_POS. Using LS covariance or huge variance (maxDivDist²) causes
+    // the KF to over-trust observations, moving position by 100+ meters from DD residuals.
+    double initPosVar = Math.pow(stDevInit, 2);
+    positionCovariance = new SimpleMatrix(3, 3);
+    Cee.set(0, 0, initPosVar);
+    Cee.set(i1 + 1, i1 + 1, initPosVar);
+    Cee.set(i2 + 1, i2 + 1, initPosVar);
     for (int i = 1; i < o1; i++) {
       Cee.set(i, i, initPosVar);
       Cee.set(i + i1 + 1, i + i1 + 1, initPosVar);
@@ -686,8 +678,9 @@ public abstract class KalmanFilter extends LS_DD_code {
             "/" + maxDivReset + "), keep prediction + inflate Cee (RTKLIB-style)");
         KFstate = KFprediction;
         KFprediction = T.mult(KFstate);
-        // Inflate position covariance to allow recovery
-        double inflateVar = Math.pow(goGPS.getMaxDivergenceDistance() / 1000.0, 2);
+        // RTKLIB-aligned: reset position variance to VAR_POS (900 m²), not maxDivDist².
+        // RTKLIB udpos() resets to VAR_POS when var > VAR_POS, allowing gradual recovery.
+        double inflateVar = Math.pow(stDevInit, 2);
         Cee = K.copy();
         for (int idx = 0; idx < o3; idx++) {
           if (Cee.get(idx, idx) < inflateVar) {
