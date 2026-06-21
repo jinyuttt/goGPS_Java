@@ -410,7 +410,7 @@ public class DecodeMSMMsg implements Decode {
 						lli |= 1;
 					}
 					os.setLossLockInd(freqIdx, lli);
-					if (satType == 'C' && satId == 10) {
+					if (satType == 'C' && satId == 10 && false) {
 						System.err.printf("[LLI-DBG] C10 lockTime=%d lli=%d freq=%d osHash=%d%n",
 							lockTime[s][origIdx], lli, freqIdx, System.identityHashCode(os));
 					}

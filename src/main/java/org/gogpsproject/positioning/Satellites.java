@@ -358,6 +358,12 @@ public class Satellites {
   double computeWindUpCorrection(double time, double[] rs, double[] rr,
       Map<Integer, Double> prevPhw, long prevTime, int satId) {
 
+    // Guard against invalid receiver position (e.g., [0,0,0] during SPP failure)
+    // ecef2pos([0,0,0]) produces degenerate coordinates → NaN in wind-up
+    if (rr == null || (rr[0] == 0.0 && rr[1] == 0.0 && rr[2] == 0.0)) {
+      return 0.0;
+    }
+
     Double prev = prevPhw.get(satId);
     if (prev == null) {
       prevPhw.put(satId, 0.0);

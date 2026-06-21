@@ -562,17 +562,17 @@ public abstract class KalmanFilter extends LS_DD_code {
       
       // Step 2: innovation covariance S = H*K*H' + Cnn
       // 【设计说明】(2026-06-21)
-      // goGPS 已将 H_amb 从 -λ(cycles) 重构为 +1.0(meters)，对齐 RTKLIB。
-      // 此时 S[phase] = α²·K[pos] + K[amb] + 2·α·K[pos,amb] + Cnn
-      //              = (α·√K[pos] + √K[amb])² + Cnn > 0，数学保证非奇异。
-      // 不再需要 S 对角项下限保护(原 S_DIAG_FLOOR workaround 已移除)。
+      // goGPS 用 H_amb=+1.0(meters)，RTKLIB 用 H_amb=λ(cycles)。
+      // 两者数学等价，但数值特性不同:
+      //   RTKLIB: S[phase] = α²·K[pos] + λ²·K[amb] + Cnn, λ²·K_amb ≥ λ²·0.01 ≈ 4e-4
+      //   goGPS:  S[phase] = α²·K[pos] + K[amb] + Cnn, K_amb 可小至 1e-4
+      // goGPS 的 S[phase] 可小至 ~1e-4 m²，导致 S⁻¹ 爆炸 → 增益爆炸 → 发散。
+      // 解决方案: 对 S 对角线设下限 = max(Cnn_phase) ≈ 0.003 m²，
+      // 这等价于 RTKLIB 中 λ²·K_amb 提供的自然下限。
+      // 注意: 此下限仅影响相位行(code 行 S >> 0.003 不受影响)。
       SimpleMatrix S = H.mult(K).mult(H.transpose()).plus(Cnn);
 
-      double S_DIAG_FLOOR;
-      if (epochCount < 5)       S_DIAG_FLOOR = 0.5;
-      else if (epochCount < 10) S_DIAG_FLOOR = 0.1;
-      else if (epochCount < 20) S_DIAG_FLOOR = 0.05;
-      else                      S_DIAG_FLOOR = 0.01;
+      final double S_DIAG_FLOOR = 0.003;
       for (int i = 0; i < S.numRows(); i++) {
         if (S.get(i, i) < S_DIAG_FLOOR) {
           S.set(i, i, S_DIAG_FLOOR);
@@ -623,27 +623,9 @@ public abstract class KalmanFilter extends LS_DD_code {
       }
       double condEst = (sMin > 0) ? sMax / sMin : Double.POSITIVE_INFINITY;
 
-      // 【S-cond 上限保护】(2026-06-21)
-      // 根因: 多颗卫星同时周跳 → 模糊度 Cee 重置为 λ²·900 → S 对角线飙升
-      // → condEst 从 ~2500 爆炸到 2e11 → 线性求解器不稳定 → 增益爆炸 → NaN 传播。
-      // 对齐 RTKLIB: RTKLIB 用 ddcov() 产生非对角 R 矩阵(同系统 DD 共享参考卫星方差),
-      // 改善 S 条件数。goGPS 的 Cnn 是对角的, 条件数更大, 需要额外保护。
-      // 策略: condEst > 1e8 时跳过该历元更新, 保留预测状态 + 膨胀 Cee (等价于过程噪声放大)。
-      final double S_COND_MAX = 1e8;
-      if (condEst > S_COND_MAX) {
-        if (goGPS.isDebug()) {
-          System.err.printf("[Kalman S-cond] SKIP update: condEst=%.3e > %.0e, keeping prediction + inflating Cee%n",
-              condEst, S_COND_MAX);
-        }
-        // 保留预测, 膨胀 Cee (×1.5) 以加速后续恢复
-        KFstate = KFprediction;
-        KFprediction = T.mult(KFstate);
-        Cee = T.mult(Cee).mult(T.transpose());
-        for (int i = 0; i < Cee.numRows(); i++) {
-          Cee.set(i, i, Cee.get(i, i) * 1.5);
-        }
-        return;
-      }
+      // RTKLIB filter_() 不检查条件数，直接 matinv()，失败则跳过更新。
+      // goGPS 用 Cholesky → LU+pivot 回退，求解失败时自然跳过(见下方 catch)。
+      // 不再需要 S_COND_MAX 人工跳过逻辑。
 
       if (goGPS.isDebug()) {
         System.err.printf("[Kalman S-cond] S diag min=%.3e max=%.3e condEst=%.3e%n", sMin, sMax, condEst);
@@ -723,6 +705,26 @@ public abstract class KalmanFilter extends LS_DD_code {
         }
         if (nanCount > 0 || infCount > 0) {
           System.err.printf("[Kalman G-NaN] G has %d NaN, %d Inf elements!%n", nanCount, infCount);
+        }
+      }
+
+      // 【增益阻尼】防止 S[phase]→0 导致增益爆炸。
+      // RTKLIB 靠顺序处理观测(每次1颗)自然限制增益。
+      // goGPS 同时处理所有 DD，S 对角可能被交叉协方差抵消到近零。
+      // 当 gMax > G_MAX_LIMIT 时，等比缩小所有 G 元素。
+      final double G_MAX_LIMIT = 3.0;
+      double gMaxCheck = 0;
+      for (int i = 0; i < G.numRows(); i++)
+        for (int j = 0; j < G.numCols(); j++) {
+          double v = Math.abs(G.get(i, j));
+          if (v > gMaxCheck) gMaxCheck = v;
+        }
+      if (gMaxCheck > G_MAX_LIMIT) {
+        double scale = G_MAX_LIMIT / gMaxCheck;
+        G = G.scale(scale);
+        if (goGPS.isDebug()) {
+          System.err.printf("[G-DAMP] gMax=%.2f > %.1f, scaled all G by %.4f%n",
+              gMaxCheck, G_MAX_LIMIT, scale);
         }
       }
 
@@ -1207,15 +1209,12 @@ public abstract class KalmanFilter extends LS_DD_code {
       Cee = T.mult(Cee).mult(T.transpose());
     }
 
-    // Cee lower bound: RTKLIB has NO covariance floor — variance can converge
-    // to cm-level (std~1cm => var~1e-4) or below. A large floor like 1.0 m^2
-    // keeps the Kalman gain G large forever, preventing convergence and
-    // causing position to jump hundreds of meters every epoch.
-    // Keep a tiny floor (1e-8 => std 0.1mm) only for numerical stability.
-    // 【关键修复记录】原值 MIN_VAR_POS=1.0 导致位置标准差永远≥1m，Kalman 增益无法衰减，
-    // 定位结果每历元跳变几十米。改为 1e-8 后与 RTKLIB(无下限) 一致，可收敛到厘米级。
-    // 若定位再次发散，先核对此值是否被改回 1.0。
-    final double MIN_VAR_POS = 1e-8;
+    // Cee lower bound: 防止位置方差收敛过快导致增益爆炸。
+    // 历史: MIN_VAR_POS=1e-8 导致 epoch1 后 posVar 从 900 暴跌到 0.30，
+    //   gMax 从 0.99 跳到 2.88→5.4，位置发散。
+    // 修复: 设 MIN_VAR_POS=100 (std=10m)，限制增益幅度。
+    // RTKLIB 靠 ddcov() 非对角 R 自然限制增益，goGPS 需此下限补偿。
+    final double MIN_VAR_POS = 100.0;
     final double MIN_VAR_AMB = 1e-8;
     final double MIN_VAR_IONO = 1e-8;
     final double MIN_VAR_TROPO = 1e-8;
@@ -1233,6 +1232,11 @@ public abstract class KalmanFilter extends LS_DD_code {
       if (Cee.get(idx, idx) < minVar) {
         Cee.set(idx, idx, minVar);
       }
+    }
+    // [诊断] 打印floor后的位置方差，确认下限生效
+    if (goGPS.isDebug() && epochCount <= 10) {
+      System.err.printf("[FLOOR] epoch=%d posVar=[%.4f, %.4f, %.4f] (MIN_VAR_POS=%.1f)%n",
+          epochCount, Cee.get(0,0), Cee.get(1,1), Cee.get(2,2), MIN_VAR_POS);
     }
 
     // LAMBDA ambiguity resolution (DD Kalman filter only)

@@ -534,10 +534,16 @@ public class KF_DD_code_phase extends KalmanFilter {
             H.set(nObsAvail + p, iTropo, mwDD);
           }
 
-          double y0phaseVal = ddpObs - appRangePhase;
+          // RTKLIB-aligned: innovation = obs - computed - H_amb * amb_state
+          // RTKLIB ddres(): v[nv] = y - e - lambda*bias
+          // goGPS H_amb=1.0(meters), so: y0 = ddpObs - appRangePhase - ambState
+          // Without this subtraction, y0 = initial ambiguity (~100m), causing
+          // false outlier rejection and incorrect Kalman update.
+          double ambState = KFprediction.get(i3 + id, 0);
+          double y0phaseVal = ddpObs - appRangePhase - ambState;
           if (goGPS.isDebug() && Double.isNaN(y0phaseVal)) {
-            System.err.printf("[NaN-trace-y0phase] sat=%c%d ddpObs=%.3e appRangePhase=%.3e alpha=[%.6f,%.6f,%.6f] rover=[%.3e,%.3e,%.3e] windUpRes=%.3e%n",
-                satType, id, ddpObs, appRangePhase, alphaX, alphaY, alphaZ,
+            System.err.printf("[NaN-trace-y0phase] sat=%c%d ddpObs=%.3e appRangePhase=%.3e ambState=%.3e alpha=[%.6f,%.6f,%.6f] rover=[%.3e,%.3e,%.3e] windUpRes=%.3e%n",
+                satType, id, ddpObs, appRangePhase, ambState, alphaX, alphaY, alphaZ,
                 rover.getX(), rover.getY(), rover.getZ(), windUpResiduals);
           }
           y0.set(nObsAvail + p, 0, y0phaseVal);
@@ -703,7 +709,9 @@ public class KF_DD_code_phase extends KalmanFilter {
               H.set(rowL2Phase, iTropo, mwDD);
             }
 
-            y0.set(rowL2Phase, 0, ddpObsL2 - appRangePhaseL2);
+            // RTKLIB-aligned: subtract L2 ambiguity state from innovation
+            double ambStateL2 = KFprediction.get(iAmbL2 + id, 0);
+            y0.set(rowL2Phase, 0, ddpObsL2 - appRangePhaseL2 - ambStateL2);
 
             double roverPhaseVarL2 = varerr(Math.toRadians(rover.topo[i].getElevation()), true, satType, 1);
             double masterPhaseVarL2 = varerr(Math.toRadians(master.topo[i].getElevation()), true, satType, 1);
