@@ -219,15 +219,18 @@ public class Decode1042Msg implements Decode {
 		eph.setOmegaDot(omegaDot);
 		i += 24;
 		
-		// TGD1 (B1I group delay): 10 bits, scale 2^-33 s
+		// TGD1 (B1I group delay): 10 bits, scale 1E-10 s (0.1 ns)
+		// RTKLIB rtcm3.c decode_type1042: eph.tgd[0] = getbits(buff,i,10) * 1E-10
+		// BDS ICD: TGD1 为 10 位有符号数，分辨率 0.1 ns
+		// 【修复】原用 P2_33(≈1.164E-10) 导致 TGD 值偏大 ~16.4%
 		if (i + 10 > maxBits) return partialResult(eph, "TGD1", i, maxBits);
-		double tgd1 = decodeSigned(bits, i, 10) * P2_33;
+		double tgd1 = decodeSigned(bits, i, 10) * 1E-10;
 		eph.setTgd(tgd1);
 		i += 10;
 		
-		// TGD2 (B2I group delay): 10 bits, scale 2^-33 s
+		// TGD2 (B2I group delay): 10 bits, scale 1E-10 s (0.1 ns)
 		if (i + 10 > maxBits) return partialResult(eph, "TGD2", i, maxBits);
-		double tgd2 = decodeSigned(bits, i, 10) * P2_33;
+		double tgd2 = decodeSigned(bits, i, 10) * 1E-10;
 		eph.setTgd2(tgd2);
 		i += 10;
 		

@@ -6,7 +6,6 @@ import java.util.Map;
 
 import org.ejml.simple.SimpleMatrix;
 import org.gogpsproject.Constants;
-import org.gogpsproject.RtkLibConstants;
 import org.gogpsproject.GoGPS;
 import org.gogpsproject.Status;
 import org.gogpsproject.producer.NavigationProducer;
@@ -14,6 +13,43 @@ import org.gogpsproject.producer.ObservationSet;
 import org.gogpsproject.producer.Observations;
 import org.gogpsproject.producer.parser.IonoGps;
 
+/**
+ * 【RTKLIB 对齐说明 - Satellites.java】
+ *
+ * 本类计算卫星位置、几何距离及大气改正，对应 RTKLIB rtkpos.c 的 zdres()。
+ * 核心对齐点(已反复核对，勿重复检查):
+ *
+ * 1. satAppRange = 纯几何距离 ||sat-rcv|| (不加卫星钟差!)
+ *    - RTKLIB zdres(): r = geodist() + (-CLIGHT*dts) + tropo_zhd
+ *    - goGPS: satAppRange = geomRange (见 ~L540, ~L672)
+ *    - 【关键差异】goGPS 的 transmitTimeGPST = tRaw - satelliteClockError
+ *      (见 EphemerisSystem.computeClockCorrectedTransmissionTime)，
+ *      卫星位置已对应钟差改正后的发射时间，geomRange 已隐含钟差影响(~4m 量级)。
+ *      若再减 satClockRange 会重复扣除(y0Max 从 377m 升到 534m，已验证回退)。
+ *    - RTKLIB transmitTime 不减 dts，钟差作为 r += -CLIGHT*dts 单独加。
+ *      两者数学不等价但差异小(~4m)，不是 y0 残差主因。
+ *
+ * 2. 卫星钟差(satelliteClockError)
+ *    - 来自 EphemerisSystem.computeSatelliteClockError()，单位 seconds
+ *    - 已用于 transmitTime 计算，卫星位置已隐含，satAppRange 不再扣
+ *    - 注意: 此钟差【不含】TGD，TGD 在 EphemerisSystem 中一次性扣到伪距上。
+ *
+ * 3. Sagnac(地球自转)改正
+ *    - RTKLIB: 在 geodist() 中作为距离项 theta*omega/c 加
+ *    - goGPS: 在 EphemerisSystem.computeEarthRotationCorrection() 中旋转卫星位置
+ *    - 两者一阶等价，此处不再重复加。
+ *
+ * 4. 对流层干项(tropo_zhd)
+ *    - RTKLIB: 并入 r
+ *    - goGPS: 留在 KF_DD_code_phase.setup() 的 appRangeCode 中通过 satTropoCorr 叠加
+ *
+ * 5. 排查顺序(若 y0 残差异常大):
+ *    ① transmitTime 是否重复减 satelliteClockError(见 EphemerisSystem)
+ *    ② TGD 是否被重复扣(EphemerisSystem.isTgdApplied 标志)
+ *    ③ Sagnac 是否重复加(此处不应再加)
+ *    ④ 对流层/电离层改正是否在 setup() 的 appRangeCode 中正确叠加
+ *    ⑤ 模糊度初始化是否正确(OBSERV/APPROX/LS 策略)
+ */
 public class Satellites {
   
   GoGPS goGPS;
@@ -44,6 +80,13 @@ public class Satellites {
 
   /** Index of the satellite with highest elevation in satAvail list */
   int pivot;
+
+  /** RTKLIB-aligned: per-frequency reference satellite index.
+   * pivot = L1 reference (highest elevation with L1 phase, rover+master).
+   * pivotL2 = L2 reference (highest elevation with L2 phase, rover+master),
+   *           selected independently (may differ from pivot). -1 if none.
+   * Reference: RTKLIB rtkpos.c ddres() selects ref sat per frequency. */
+  int pivotL2 = -1;
 
   public Satellites(GoGPS goGPS) {
     this.goGPS = goGPS;
@@ -479,6 +522,11 @@ public class Satellites {
 
     init( roverObs );
     
+    if (goGPS.isDebug()) {
+      System.err.printf("[SELSTD] rover ecef=[%.1f,%.1f,%.1f] isValid=%s nObs=%d%n",
+          rover.getX(), rover.getY(), rover.getZ(), rover.isValidXYZ(), roverObs.getNumSat());
+    }
+    
     // Compute topocentric coordinates and
     // select satellites above the cutoff level
     for( int i = 0; i < roverObs.getNumSat(); i++) {
@@ -498,22 +546,31 @@ public class Satellites {
     	  	}
     	  	
         // Compute rover-satellite approximate pseudorange
+        // 【RTKLIB 对齐说明】satAppRange = 纯几何距离 ||sat-rcv||。
+        // RTKLIB zdres(): r = geodist() + (-CLIGHT*dts) + tropo_zhd。
+        // goGPS 的 transmitTimeGPST = tRaw - satelliteClockError (见 EphemerisSystem)，
+        // 卫星位置已对应钟差改正后的发射时间，geomRange 已隐含钟差影响(~4m 量级)。
+        // 若再减 satClockRange 会重复扣除，导致 y0 残差从 377m 升到 534m。
+        // 对流层干项/电离层/天线改正分别在 KF_DD_code_phase.setup() 的 appRangeCode 中叠加。
+        // 【排查记录】曾尝试加 -satClockRange 对齐 RTKLIB，但 y0Max 反升，已回退。
+        //   原因: goGPS transmitTime 已减 satelliteClockError，与 RTKLIB 的 r+=-CLIGHT*dts
+        //   数学不等价(RTKLIB transmitTime 不减 dts)。两者卫星位置对应时间差 dts(~1us)。
+        //   若 y0 残差异常，优先核查 transmitTime 计算而非此处。
         rover.diffSat[i] = rover.minusXYZ(pos[i]);
         double geomRange = Math.sqrt(Math.pow(rover.diffSat[i].get(0), 2)
             + Math.pow(rover.diffSat[i].get(1), 2)
             + Math.pow(rover.diffSat[i].get(2), 2));
 
-        // Sagnac (earth rotation) correction - RTKLIB-aligned.
-        // RTKLIB geodist() returns r + OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT.
-        // Without this, SPP has a systematic bias of tens of meters.
-        double sagnac = RtkLibConstants.OMGE
-            * (pos[i].getX() * rover.getY() - pos[i].getY() * rover.getX())
-            / Constants.SPEED_OF_LIGHT;
-        rover.satAppRange[i] = geomRange + sagnac;
+        // Earth rotation (Sagnac) correction is already applied to the satellite
+        // position in EphemerisSystem.computeEarthRotationCorrection (position
+        // rotation by omega*traveltime). RTKLIB applies the equivalent correction
+        // as a range term in geodist(); goGPS applies it as a position rotation.
+        // Both are first-order equivalent, so no additional Sagnac term here.
+        rover.satAppRange[i] = geomRange;
 
         if (goGPS.isDebug()) {
-          System.err.printf("[SATRNG] sat=%c%d geom=%.3f sagnac=%.3f range=%.3f rcv=[%.1f,%.1f,%.1f] sat=[%.1f,%.1f,%.1f]%n",
-              satType, id, geomRange, sagnac, rover.satAppRange[i],
+          System.err.printf("[SATRNG] sat=%c%d geom=%.3f range=%.3f rcv=[%.1f,%.1f,%.1f] sat=[%.1f,%.1f,%.1f]%n",
+              satType, id, geomRange, rover.satAppRange[i],
               rover.getX(), rover.getY(), rover.getZ(),
               pos[i].getX(), pos[i].getY(), pos[i].getZ());
         }
@@ -602,10 +659,12 @@ public class Satellites {
     // Variables to store highest elevation
     double maxElevCode = 0;
     double maxElevPhase = 0;
+    double maxElevPhaseL2 = 0;
 
     // Variables for code pivot and phase pivot
     int pivotCode = -1;
     int pivotPhase = -1;
+    int pivotPhaseL2 = -1;
 
     // Satellite ID
     int id = 0;
@@ -620,9 +679,22 @@ public class Satellites {
       // Compute GPS satellite positions
       pos[i] = navigation.getGpsSatPosition(roverObs, id, satType, rover.getClockError());
 
+      // 【TGD 对齐修复】master 伪距也需要扣除 TGD。
+      // getGpsSatPosition 的副作用是调用 computeSatPosition，其中会通过 isTgdApplied
+      // 标志对 obs 的伪距一次性扣除 TGD。roverObs 已在上一行触发此副作用，
+      // 但 masterObs 从未经过 computeSatPosition，导致 master 伪距不含 TGD 改正。
+      // SD 中 roverPR(已扣TGD) - masterPR(未扣TGD) 会引入 -TGD 的卫星相关偏差。
+      // 修复: 对 masterObs 也调用 getGpsSatPosition 触发 TGD 应用，忽略返回的卫星位置
+      // (rover/master 基线 401m，发射时间差 ~1μs，卫星位置差异 <0.1m，可忽略)。
+      // 【空指针保护】masterObs 可能不包含该卫星(周跳/失锁)，跳过 TGD 应用避免 NPE。
+      if (masterObs.getSatByIDType(id, satType) != null) {
+        navigation.getGpsSatPosition(masterObs, id, satType, 0);
+      }
+
       if(pos[i]!=null){
 
         // Compute rover-satellite approximate pseudorange
+        // 【RTKLIB 对齐】satAppRange = 纯几何距离(见类头说明，勿加 satClockRange)
         rover.diffSat[i] = rover.minusXYZ(pos[i]);
         rover.satAppRange[i] = Math.sqrt(Math.pow(rover.diffSat[i].get(0), 2)
                              + Math.pow(rover.diffSat[i].get(1), 2)
@@ -634,16 +706,11 @@ public class Satellites {
                               + Math.pow(master.diffSat[i].get(1), 2)
                               + Math.pow(master.diffSat[i].get(2), 2));
 
-        // Sagnac (earth rotation) correction - RTKLIB-aligned.
-        // RTKLIB geodist() returns r + OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT.
-        // Applied to both rover and master geometric ranges so that DD
-        // geometry (sdGeom) is consistent with RTKLIB.
-        rover.satAppRange[i] += RtkLibConstants.OMGE
-            * (pos[i].getX() * rover.getY() - pos[i].getY() * rover.getX())
-            / Constants.SPEED_OF_LIGHT;
-        master.satAppRange[i] += RtkLibConstants.OMGE
-            * (pos[i].getX() * masterPos.getY() - pos[i].getY() * masterPos.getX())
-            / Constants.SPEED_OF_LIGHT;
+        // Earth rotation (Sagnac) correction is already applied to the satellite
+        // position in EphemerisSystem.computeEarthRotationCorrection (position
+        // rotation by omega*traveltime). RTKLIB applies the equivalent correction
+        // as a range term in geodist(); goGPS applies it as a position rotation.
+        // Both are first-order equivalent, so no additional Sagnac term here.
 
         // Compute azimuth, elevation and distance for each satellite from rover
         rover.topo[i] = new TopocentricCoordinates();
@@ -738,11 +805,11 @@ public class Satellites {
           typeAvail.add(satType);
           gnssAvail.add(String.valueOf(satType) + String.valueOf(id));  
 
-          // Check if also phase is available for both rover and master
+          // Check if also phase is available for both rover and master (L1)
           if (!Double.isNaN(roverObs.getSatByIDType(id, satType).getPhaseCycles(goGPS.getFreq())) &&
               !Double.isNaN(masterObs.getSatByIDType(id, satType).getPhaseCycles(goGPS.getFreq()))) {
 
-            // Find phase pivot satellite (with highest elevation)
+            // Find L1 phase pivot satellite (with highest elevation)
             if (roverElev > maxElevPhase) {
               pivotPhase = i;
               maxElevPhase = roverElev;
@@ -751,16 +818,51 @@ public class Satellites {
             availPhase.add(id);
             typeAvailPhase.add(satType);
             gnssAvailPhase.add(String.valueOf(satType) + String.valueOf(id));
+
+            // RTKLIB-aligned: independently select L2 phase reference satellite.
+            // RTKLIB rtkpos.c ddres() selects ref sat per frequency f via
+            // validobs(iu[j],ir[j],f,nf,y). Here we check L2 (freq 1) phase
+            // availability for both rover and master, and pick highest elev.
+            if (goGPS.isDualFreq() &&
+                !Double.isNaN(roverObs.getSatByIDType(id, satType).getPhaseCycles(1)) &&
+                !Double.isNaN(masterObs.getSatByIDType(id, satType).getPhaseCycles(1))) {
+              if (roverElev > maxElevPhaseL2) {
+                pivotPhaseL2 = i;
+                maxElevPhaseL2 = roverElev;
+              }
+            }
           }
         }
       }
     }
 
-    // Select best pivot satellite
+    // Select best pivot satellite (L1 reference)
     if( pivotPhase != -1 ){
       pivot = pivotPhase;
     }else{
       pivot = pivotCode;
+    }
+
+    // RTKLIB-aligned: L2 reference satellite (independent of L1 pivot).
+    // Falls back to L1 pivot if it also has L2 phase, ensuring a valid
+    // L2 reference whenever possible.
+    if (goGPS.isDualFreq()) {
+      if (pivotPhaseL2 != -1) {
+        pivotL2 = pivotPhaseL2;
+      } else if (pivotPhase != -1 &&
+          !Double.isNaN(roverObs.getSatByIDType(roverObs.getSatID(pivotPhase), roverObs.getGnssType(pivotPhase)).getPhaseCycles(1)) &&
+          !Double.isNaN(masterObs.getSatByIDType(roverObs.getSatID(pivotPhase), roverObs.getGnssType(pivotPhase)).getPhaseCycles(1))) {
+        pivotL2 = pivotPhase;
+      } else {
+        pivotL2 = -1;
+      }
+      if (goGPS.isDebug()) {
+        System.err.printf("[Pivot-select] L1=%c%d L2=%c%d%n",
+            pivot >= 0 ? roverObs.getGnssType(pivot) : '?', pivot >= 0 ? roverObs.getSatID(pivot) : -1,
+            pivotL2 >= 0 ? roverObs.getGnssType(pivotL2) : '?', pivotL2 >= 0 ? roverObs.getSatID(pivotL2) : -1);
+      }
+    } else {
+      pivotL2 = -1;
     }
   }
 }

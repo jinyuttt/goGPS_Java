@@ -55,9 +55,9 @@ public class Decode1044Msg implements Decode {
 		eph.setIode(iode);
 		i += 8;
 		
-		// Toe (Time of Ephemeris): 32 bits (BDS seconds of week)
+		// Toe (Time of Ephemeris): 32 bits (GPS seconds of week)
 		double toe = decodeUnsigned(bits, i, 32);
-		eph.setToe(toe + 14.0);  // BDT → GPST
+		eph.setToe(toe);
 		i += 32;
 		
 		// AODE (Age of Data Ephemeris): 16 bits (seconds)
@@ -98,9 +98,9 @@ public class Decode1044Msg implements Decode {
 		eph.setRootA(rootA);
 		i += 32;
 		
-		// ToC (Time of Clock): 32 bits (BDS seconds of week)
+		// ToC (Time of Clock): 32 bits (GPS seconds of week)
 		double toc = decodeUnsigned(bits, i, 32);
-		eph.setToc(toc + 14.0);  // BDT → GPST
+		eph.setToc(toc);
 		i += 32;
 		
 		// Cic: 16 bits, scale 2^-29

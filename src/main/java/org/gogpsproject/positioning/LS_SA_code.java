@@ -19,6 +19,12 @@ public class LS_SA_code extends Core {
 
     boolean debug = goGPS.isDebug();
 
+    // 【修改0】如果接收机位置无效（NaN），设为零向量，避免矩阵运算传播NaN
+    if (!rover.isValidXYZ()) {
+      rover.setXYZ(0, 0, 0);
+      rover.computeGeodetic();
+    }
+
     // Number of GNSS observations without cutoff
     int nObs = roverObs.getNumSat();
 
@@ -49,7 +55,7 @@ public class LS_SA_code extends Core {
     SimpleMatrix Q = ignoreTopocentricParameters ? SimpleMatrix.identity(nObsAvail) : new SimpleMatrix(nObsAvail, nObsAvail);
 
     // Solution vector
-    SimpleMatrix x = new SimpleMatrix(nUnknowns, 1);
+    SimpleMatrix x;
 
     // Vector for observation error
     SimpleMatrix vEstim = new SimpleMatrix(nObsAvail, 1);
@@ -124,21 +130,19 @@ public class LS_SA_code extends Core {
     }
 
     // Least squares solution x = ((A'*Q^-1*A)^-1)*A'*Q^-1*(y0-b);
-    SimpleMatrix AtQinv = A.transpose().mult(Q.invert());
-    SimpleMatrix N = AtQinv.mult(A);
-    // 【修改1】最小二乘解算：矩阵求逆与NaN检查
-    // 北斗GEO卫星几何分布单一，设计矩阵可能接近奇异，导致求逆失败
-    SimpleMatrix Ninv;
+    // 【修改1】整个矩阵求逆块用try-catch保护，覆盖Q.invert()和N.invert()
     try {
-      Ninv = N.invert();
+      SimpleMatrix AtQinv = A.transpose().mult(Q.invert());
+      SimpleMatrix N = AtQinv.mult(A);
+      SimpleMatrix Ninv = N.invert();
+      SimpleMatrix y0MinusB = y0.minus(b);
+      x = Ninv.mult(AtQinv).mult(y0MinusB);
     } catch (Exception e) {
-      // 矩阵奇异时（如仅使用北斗GEO卫星），将定位结果设为无效
+      // 矩阵奇异时（如NaN接收机位置、仅使用北斗GEO卫星等），将定位结果设为无效
       System.err.println("[LS_SA] Matrix inversion failed: " + e.getMessage());
       rover.setXYZ(0, 0, 0);
       return;
     }
-    SimpleMatrix y0MinusB = y0.minus(b);
-    x = Ninv.mult(AtQinv).mult(y0MinusB);
     
     // 【修改2】检查解算结果是否包含NaN值
     // 当观测值误差过大或矩阵病态时，最小二乘解可能出现NaN
@@ -194,15 +198,19 @@ public class LS_SA_code extends Core {
 
     // Covariance matrix of the estimation error
     if (nObsAvail >= nUnknowns) {
-      SimpleMatrix cofactor = A.transpose().mult(Q.invert()).mult(A).invert();
-      if (nObsAvail > nUnknowns) {
-        double varianceEstim = (vEstim.transpose().mult(Q.invert())
-            .mult(vEstim)).get(0)
-            / (nObsAvail - nUnknowns);
-        positionCovariance = cofactor.scale(varianceEstim).extractMatrix(0, 3, 0, 3);
-      } else {
-        // nObsAvail == nUnknowns: no redundancy, use cofactor directly
-        positionCovariance = cofactor.extractMatrix(0, 3, 0, 3);
+      try {
+        SimpleMatrix cofactor = A.transpose().mult(Q.invert()).mult(A).invert();
+        if (nObsAvail > nUnknowns) {
+          double varianceEstim = (vEstim.transpose().mult(Q.invert())
+              .mult(vEstim)).get(0)
+              / (nObsAvail - nUnknowns);
+          positionCovariance = cofactor.scale(varianceEstim).extractMatrix(0, 3, 0, 3);
+        } else {
+          positionCovariance = cofactor.extractMatrix(0, 3, 0, 3);
+        }
+      } catch (Exception e) {
+        System.err.println("[LS_SA] Covariance computation failed: " + e.getMessage());
+        positionCovariance = null;
       }
     } else {
       positionCovariance = null;

@@ -53,6 +53,9 @@ public class DecodeMSMMsg implements Decode {
 	private int msgType;
 	private int msmLevel;
 
+	// Static counter to limit MSM decode debug output
+	private static int msmDecodeCount = 0;
+
 	public DecodeMSMMsg(int msgType) {
 		this.msgType = msgType;
 		this.msmLevel = msgType % 10;
@@ -353,9 +356,11 @@ public class DecodeMSMMsg implements Decode {
 					sigFreqIdx[fi] = fi;
 				}
 
-				if (s == 0 && satType == 'C') {
+				if (false && satType == 'C' && msmDecodeCount < 40) {
+					msmDecodeCount++;
 					StringBuilder sb = new StringBuilder();
-					sb.append(String.format("[MSM decode] BDS sat=%d, sigCount=%d", satId, sigCount));
+					sb.append(String.format("[MSM decode] %s BDS sat=%d, sigCount=%d",
+						s == 0 ? "ROVER" : "MASTER", satId, sigCount));
 					for (int si = 0; si < nSigDecode; si++) {
 						if (sigOrigIdx[si] >= 0) {
 							sb.append(String.format(" | f%d: code=%d(%s) pri=%d",
@@ -405,6 +410,10 @@ public class DecodeMSMMsg implements Decode {
 						lli |= 1;
 					}
 					os.setLossLockInd(freqIdx, lli);
+					if (satType == 'C' && satId == 10) {
+						System.err.printf("[LLI-DBG] C10 lockTime=%d lli=%d freq=%d osHash=%d%n",
+							lockTime[s][origIdx], lli, freqIdx, System.identityHashCode(os));
+					}
 
 					// Doppler (MSM5/7)
 					if (msmLevel == 5 || msmLevel == 7) {
@@ -499,7 +508,7 @@ public class DecodeMSMMsg implements Decode {
 	/**
 	 * Convert RTKLIB numeric code to 2-char obs string (for debug).
 	 */
-	private String codeToObsStr(int code) {
+	public static String codeToObsStr(int code) {
 		if (code < 0 || code >= OBSCODES.length) return "?";
 		return OBSCODES[code];
 	}

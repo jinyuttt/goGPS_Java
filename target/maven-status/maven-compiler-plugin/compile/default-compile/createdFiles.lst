@@ -122,7 +122,9 @@ org\gogpsproject\producer\parser\rinex\RinexNavigationParserGlonass.class
 org\gogpsproject\producer\parser\rinex\RinexNavigationSpeed.class
 org\gogpsproject\Constants.class
 org\gogpsproject\producer\parser\ublox\DecodeAIDEPH.class
+org\gogpsproject\displacement\model\SpatialStationType.class
 org\gogpsproject\producer\parser\rtcm3\Decode1005Msg.class
+org\gogpsproject\displacement\model\SpatialStatus.class
 org\gogpsproject\positioning\LS_SA_code_dopp_snapshot.class
 org\gogpsproject\GoGPS.class
 org\gogpsproject\producer\parser\ublox\UBXSnapshotSerialReader.class
@@ -181,6 +183,7 @@ org\gogpsproject\producer\parser\ublox\UBXReader.class
 org\gogpsproject\producer\NavigationProducer.class
 org\gogpsproject\producer\rinex\RinexV3Producer.class
 org\gogpsproject\displacement\model\HealthStatus.class
+org\gogpsproject\displacement\config\EngineGlobalConfig.class
 org\gogpsproject\producer\parser\rtcm3\Decode1046Msg.class
 org\gogpsproject\producer\parser\ublox\UBXException.class
 org\gogpsproject\producer\StreamResource.class
@@ -200,6 +203,7 @@ org\gogpsproject\positioning\MasterPosition.class
 org\gogpsproject\displacement\persistence\PersistenceCallback.class
 org\gogpsproject\RTCM3CsvExporter$EphRecord.class
 org\gogpsproject\producer\Streamable.class
+org\gogpsproject\displacement\model\Confidence.class
 org\gogpsproject\GoGPS$TropOpt.class
 org\gogpsproject\producer\ObservationSet.class
 org\gogpsproject\apps\LogUBX.class

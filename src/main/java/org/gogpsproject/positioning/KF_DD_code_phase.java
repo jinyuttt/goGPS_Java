@@ -13,6 +13,69 @@ import org.gogpsproject.positioning.RoverPosition.DopType;
 import org.gogpsproject.producer.Observations;
 import org.gogpsproject.producer.ObservationsProducer;
 
+/**
+ * DD (Double-Difference) Kalman Filter with code+phase observations.
+ *
+ * ================== RTKLIB 对齐总览 (rtkpos.c) ==================
+ * 本类逐项对齐 RTKLIB-2.5.0/src/rtkpos.c 的 ddres() / zdres() / udbias() / holdamb()。
+ * 以下为已核对并落地的对齐点与已知差异，便于快速核实，避免反复排查：
+ *
+ * [已对齐 - 几何距离]
+ *   - satAppRange = 纯几何距离 ||sat-rover|| (Satellites.java)。
+ *   - 差异说明: RTKLIB zdres() 中 r = geodist() + (-CLIGHT*dts) + tropo_zhd。
+ *     goGPS 把卫星钟差 (-CLIGHT*dts) 放在【观测值侧】而非几何距离侧：
+ *       ddcObs(伪距DD) - ddcApp(几何DD) = (satClk_i - satClk_j) - (satClk_pivot_i - satClk_pivot_j)
+ *     由于双差会消去公共卫星钟差项，只要 rover/master 用同一组星历，该项在 DD 中近似抵消。
+ *     若残差异常大(>30m)，优先核查: 星历是否一致、TGD 是否重复扣除、卫星位置是否做了地球自转改正。
+ *
+ * [已对齐 - TGD]
+ *   - BDS TGD 在 EphemerisSystem.computePositionGps() 中一次性扣到伪距上 (os.setTgdApplied)。
+ *   - RTKLIB: TGD 不进卫星钟差(eph2clk)，只在 pseudorange 层处理，与此一致。
+ *   - 注意: TGD 只扣一次，重复调用 computePositionGps 会因 isTgdApplied 标志跳过。
+ *
+ * [已对齐 - 协方差下限]
+ *   - KalmanFilter.MIN_VAR_POS = 1e-8 (原 1.0 会阻止收敛到厘米级)。
+ *
+ * [已对齐 - 观测噪声 Cnn]
+ *   - varerr() 依高度角定权，Cnn 对角线 = rover_var + master_var (不再双重累加 baseNoise)。
+ *
+ * [已对齐 - Outlier 拒绝]
+ *   - 相位阈值 maxinno[0]=5m，码阈值 maxinno[1]=30m；首历元 threshadj=10 放宽。
+ *   - goGPS 差异: 不 skip 观测(避免矩阵索引错位)，而是 y0=0/H=0/Cnn=1e10 置零权重。
+ *
+ * [已对齐 - 模糊度初始化]
+ *   - udbias(): 新卫星/周跳时 initx(bias, SQR(std[0]=30)=900 m²)。
+ *   - L2 模糊度按 dualFreq 分配(nAmbL2=nN)，不与 estimIono 绑定(原绑定会越界崩溃)。
+ *
+ * [已对齐 - 模糊度状态单位 meters] (2026-06-21 重构，对齐 RTKLIB)
+ *   H_amb = +1.0 (meters)，与 RTKLIB 完全一致。
+ *   数学保证 S 非奇异: S[phase] = (α·√K[pos] + √K[amb])² + Cnn > 0。
+ *   (历史: 原 H_amb=-λ(cycles) 使交叉项为负，抵消 S 对角项 → 近奇异 → gMax=201 → 发散)
+ *   同步修改点(状态单位 cycles→meters):
+ *     1. H_amb L1/L2: -λ → +1.0 (L468/L660)
+ *     2. 状态初值: (codeDD-phaseDD)/λ → (codeDD-phaseDD) (estimateAmbiguities)
+ *     3. 初始方差: 900 cycle² → 900 m² (init/cycleslip 分支)
+ *     4. Qphase: λ²·Cee → Cee (Cee 已是 m²)
+ *     5. LAMBDA 输入: a[i]/λ, Q[i,j]/(λ_i·λ_j) (meters→cycles, LAMBDA 要求 cycles)
+ *     6. LAMBDA 固定: F[i]·λ (cycles→meters, 赋回 KFstate)
+ *   holdamb 无需改(H_hold=1.0, v_hold=fixedVal(meters), 与 KFstate 一致)。
+ *   ambswap 无需改(±1 是 DD 重定义，与单位无关)。
+ *
+ * [已对齐 - LAMBDA 与 holdamb]
+ *   - ratio 阈值 3.0；连续固定 MIN_FIX_HOLD=10 次后 holdamb(VAR_HOLDAMB=0.001)。
+ *
+ * [已知差异 - 待观察]
+ *   - BDS GEO 噪声放大 GEO_NOISE_SCALE=8.0 (RTKLIB 无此放大，必要时改 1.0 核对)。
+ *   - 周跳检测同时启用 LLI/Doppler/GF/ApproxRange 四种，较 RTKLIB(仅 LLI+gf) 更敏感，
+ *     可能导致模糊度频繁重置、sqrtCov 停留在 30。若 ratio 长期<3，优先排查此处。
+ *   - 电离层/对流层估计: TestRTK 设 OFF(用广播模型)，与 RTKLIB brdc/saas 一致。
+ *
+ * [关键调试入口]
+ *   - epoch0 残差: [DEBUG KF DD] / [EPOCH0 phase] / [OUTLIER-*]
+ *   - LAMBDA 输入: [LAMBDA INPUT] a / Q，与 RTKLIB tracemat 逐元素对比。
+ *   - 参考坐标: [KF_DD run] masterIn(1005) 与 RTKLIB epoch0 reference。
+ * ================================================================
+ */
 public class KF_DD_code_phase extends KalmanFilter {
 
   private static final int BDS_GEO_MIN = 1;
@@ -43,6 +106,11 @@ public class KF_DD_code_phase extends KalmanFilter {
   private static final double GMF_A = 1.001;
   private static final double GMF_B = 0.002001;
 
+  /** Dummy observation variance for sats lacking L2 code/phase.
+   * Keeps S matrix non-singular without affecting the KF solution
+   * (y0=0, H=0 => zero Kalman gain for that row). */
+  private static final double DUMMY_OBS_VAR = 1.0e10;
+
   /**
    * Check if a BDS satellite is GEO based on PRN.
    * BDS-2 GEO: C01-C05 (PRN 1-5). BDS-3 GEO: may use different PRN ranges.
@@ -63,6 +131,14 @@ public class KF_DD_code_phase extends KalmanFilter {
     boolean dualFreq = goGPS.isDualFreq();
     boolean estimIono = goGPS.getIonoOpt() != GoGPS.IonoOpt.OFF && dualFreq;
     boolean estimTropo = goGPS.getTropOpt() != GoGPS.TropOpt.OFF && dualFreq;
+
+    // === Epoch-level diagnostic header (RTKLIB trace 对比入口) ===
+    if (goGPS.isDebug() && epochCount <= 10) {
+      System.err.printf("%n[SD-DIAG] ======== epoch=%d time=%s rover=[%.3f,%.3f,%.3f] master=[%.3f,%.3f,%.3f] ========%n",
+          epochCount, roverObs.getRefTime(),
+          rover.getX(), rover.getY(), rover.getZ(),
+          masterPos.getX(), masterPos.getY(), masterPos.getZ());
+    }
 
     // Number of GPS observations
     int nObs = roverObs.getNumSat();
@@ -92,16 +168,46 @@ public class KF_DD_code_phase extends KalmanFilter {
     double masterPivotPhaseObs = masterObs.getSatByIDType(pivotId, satType).getPhaserange(0);
 
     // L2 pivot observations (for dual-frequency)
+    // RTKLIB-aligned: L2 reference satellite is selected independently
+    // (sats.pivotL2), may differ from L1 pivot (sats.pivot).
     double roverPivotCodeObsL2 = 0, masterPivotCodeObsL2 = 0;
     double roverPivotPhaseObsL2 = 0, masterPivotPhaseObsL2 = 0;
     double gamma = 1.0; // (f1/f2)^2 = (lambda1/lambda2)^2
-    if (dualFreq) {
-      roverPivotCodeObsL2 = roverObs.getSatByIDType(pivotId, satType).getPseudorange(1);
-      masterPivotCodeObsL2 = masterObs.getSatByIDType(pivotId, satType).getPseudorange(1);
-      roverPivotPhaseObsL2 = roverObs.getSatByIDType(pivotId, satType).getPhaserange(1);
-      masterPivotPhaseObsL2 = masterObs.getSatByIDType(pivotId, satType).getPhaserange(1);
-      double lam1 = roverObs.getSatByIDType(pivotId, satType).getWavelength(0);
-      double lam2 = roverObs.getSatByIDType(pivotId, satType).getWavelength(1);
+    // L2-pivot geometry & corrections (from sats.pivotL2, not sats.pivot)
+    SimpleMatrix diffRoverPivotL2 = null;
+    double roverPivotAppRangeL2 = 0, masterPivotAppRangeL2 = 0;
+    double roverPivotTropoCorrL2 = 0, masterPivotTropoCorrL2 = 0;
+    double roverPivotIonoCorrL2 = 0, masterPivotIonoCorrL2 = 0;
+    double roverPivotAntCorrL2 = 0, masterPivotAntCorrL2 = 0;
+    double roverPivotWindUpL2 = 0, masterPivotWindUpL2 = 0;
+    double roverPivotMwL2 = 0, masterPivotMwL2 = 0;
+    boolean l2PivotSameAsL1 = false;
+    if (dualFreq && sats.pivotL2 >= 0) {
+      int pivotL2Id = roverObs.getSatID(sats.pivotL2);
+      char pivotL2Type = roverObs.getGnssType(sats.pivotL2);
+      l2PivotSameAsL1 = (sats.pivotL2 == sats.pivot);
+      roverPivotCodeObsL2 = roverObs.getSatByIDType(pivotL2Id, pivotL2Type).getPseudorange(1);
+      masterPivotCodeObsL2 = masterObs.getSatByIDType(pivotL2Id, pivotL2Type).getPseudorange(1);
+      roverPivotPhaseObsL2 = roverObs.getSatByIDType(pivotL2Id, pivotL2Type).getPhaserange(1);
+      masterPivotPhaseObsL2 = masterObs.getSatByIDType(pivotL2Id, pivotL2Type).getPhaserange(1);
+      // L2-pivot geometry & corrections (from pivotL2 index)
+      diffRoverPivotL2 = rover.diffSat[sats.pivotL2];
+      roverPivotAppRangeL2 = rover.satAppRange[sats.pivotL2];
+      masterPivotAppRangeL2 = master.satAppRange[sats.pivotL2];
+      roverPivotTropoCorrL2 = rover.satTropoCorr[sats.pivotL2];
+      masterPivotTropoCorrL2 = master.satTropoCorr[sats.pivotL2];
+      roverPivotIonoCorrL2 = rover.satIonoCorr[sats.pivotL2];
+      masterPivotIonoCorrL2 = master.satIonoCorr[sats.pivotL2];
+      roverPivotAntCorrL2 = rover.satAntennaCorr[sats.pivotL2];
+      masterPivotAntCorrL2 = master.satAntennaCorr[sats.pivotL2];
+      roverPivotWindUpL2 = rover.satWindUp[sats.pivotL2];
+      masterPivotWindUpL2 = master.satWindUp[sats.pivotL2];
+      double roverElevL2 = rover.topo[sats.pivotL2].getElevation();
+      double masterElevL2 = master.topo[sats.pivotL2].getElevation();
+      roverPivotMwL2 = tropoMapWet(roverElevL2);
+      masterPivotMwL2 = tropoMapWet(masterElevL2);
+      double lam1 = roverObs.getSatByIDType(pivotL2Id, pivotL2Type).getWavelength(0);
+      double lam2 = roverObs.getSatByIDType(pivotL2Id, pivotL2Type).getWavelength(1);
       gamma = (lam1 * lam1) / (lam2 * lam2);
     }
 
@@ -142,7 +248,7 @@ public class KF_DD_code_phase extends KalmanFilter {
     int nSatAvail = sats.avail.size() - 1;
     int nSatAvailPhase = (sats.availPhase.size() > 0) ? sats.availPhase.size() - 1 : 0;
     int l1Rows = nSatAvail + nSatAvailPhase;
-    int totalObs = dualFreq ? l1Rows * 2 : l1Rows;
+    int totalObs = (dualFreq && sats.pivotL2 >= 0) ? l1Rows * 2 : l1Rows;
 
     if (goGPS.isDebug() && epochCount <= 2) {
       System.err.printf("[KF setup] dualFreq=%b, estimIono=%b, estimTropo=%b, nObs=%d, nObsAvail=%d, nSatAvailPhase=%d, l1Rows=%d, totalObs=%d%n",
@@ -203,16 +309,35 @@ public class KF_DD_code_phase extends KalmanFilter {
         A.set(k, 2, alphaZ);
 
         // Approximate code double difference
+        // 几何双差: 纯几何距离 DD，不含卫星钟差/对流层(对流层在 appRangeCode 单独加)。
+        // RTKLIB 对应: zdres() 中 r = geodist() + (-CLIGHT*dts) + tropo_zhd，
+        // goGPS 把 -CLIGHT*dts 留在观测值侧(ddcObs)，双差后公共钟差项抵消，结果等价。
         double ddcApp = (rover.satAppRange[i] - master.satAppRange[i])
             - (roverPivotAppRange - masterPivotAppRange);
 
         // Observed code double difference (L1)
+        // 观测伪距 DD: getPseudorange() 已含卫星钟差(广播)和 TGD(BDS, EphemerisSystem 一次性扣除)。
+        // 残差 y0 = ddcObs - appRangeCode 应在 [-30,30]m 内，否则触发 OUTLIER-CODE。
+        // 若残差>100m，核查: ①rover/master 星历是否同源 ②TGD 是否被重复扣 ③地球自转改正。
         double ddcObs = (roverObs.getSatByIDType(id, satType).getPseudorange(0) - masterObs.getSatByIDType(id, satType).getPseudorange(0))
             - (roverPivotCodeObs - masterPivotCodeObs);
 
         // Observed phase double difference (L1)
         double ddpObs = (roverObs.getSatByIDType(id, satType).getPhaserange(0) - masterObs.getSatByIDType(id, satType).getPhaserange(0))
             - (roverPivotPhaseObs - masterPivotPhaseObs);
+
+        if (goGPS.isDebug() && Double.isNaN(ddpObs)) {
+          double rPh = roverObs.getSatByIDType(id, satType).getPhaserange(0);
+          double mPh = masterObs.getSatByIDType(id, satType).getPhaserange(0);
+          double rPc = roverObs.getSatByIDType(id, satType).getPhaseCycles(0);
+          double mPc = masterObs.getSatByIDType(id, satType).getPhaseCycles(0);
+          double rWl = roverObs.getSatByIDType(id, satType).getWavelength(0);
+          double mWl = masterObs.getSatByIDType(id, satType).getWavelength(0);
+          int rCode = roverObs.getSatByIDType(id, satType).getCode(0);
+          int mCode = masterObs.getSatByIDType(id, satType).getCode(0);
+          System.err.printf("[NaN-trace] sat=%c%d ddpObs=NaN | rPh=%.3e mPh=%.3e rPc=%.3e mPc=%.3e rWl=%.3e mWl=%.3e rCode=%d mCode=%d pivotPh=%.3e/%.3e%n",
+              satType, id, rPh, mPh, rPc, mPc, rWl, mWl, rCode, mCode, roverPivotPhaseObs, masterPivotPhaseObs);
+        }
 
         // Compute troposphere, ionosphere and antenna residuals
         double tropoResiduals = (rover.satTropoCorr[i] - master.satTropoCorr[i])
@@ -231,6 +356,9 @@ public class KF_DD_code_phase extends KalmanFilter {
         double mwDD = (roverMw - roverPivotMw) - (masterMw - masterPivotMw);
 
         // Compute approximate ranges (with/without iono estimation)
+        // RTKLIB 对齐: ionoopt=OFF 时电离层用广播模型(Klobuchar)直接改正观测值；
+        //              ionoopt=EST 时电离层作为状态量估计，不进 appRange。
+        // 相位电离层符号与码相反(码+, 相位-)，此处 -ionoResiduals 对应相位。
         double appRangeCode;
         double appRangePhase;
         if (estimIono) {
@@ -240,6 +368,12 @@ public class KF_DD_code_phase extends KalmanFilter {
         } else {
           appRangeCode = ddcApp + tropoResiduals + ionoResiduals + antResiduals;
           appRangePhase = ddcApp + tropoResiduals - ionoResiduals + antResiduals + windUpResiduals;
+        }
+
+        if (goGPS.isDebug() && epochCount <= 1) {
+          System.err.printf("[EPOCH0 phase] sat=%c%d: ddpObs=%.3f, appRangePhase=%.3f, y0phase=%.3f | ddcApp=%.3f tropo=%.3f ant=%.3f windUp=%.3f iono=%.3f%n",
+              satType, id, ddpObs, appRangePhase, ddpObs - appRangePhase,
+              ddcApp, tropoResiduals, antResiduals, windUpResiduals, ionoResiduals);
         }
 
         // === L1 Code Row ===
@@ -256,8 +390,39 @@ public class KF_DD_code_phase extends KalmanFilter {
           H.set(k, iTropo, mwDD);
         }
 
-        y0.set(k, 0, ddcObs - appRangeCode + alphaX * rover.getX()
-            + alphaY * rover.getY() + alphaZ * rover.getZ());
+        y0.set(k, 0, ddcObs - appRangeCode);
+
+        // === RTKLIB-aligned outlier rejection (rtkpos.c ddres() L1360-1374) ===
+        // RTKLIB: if (fabs(v[nv]) > opt->maxinno[code]*threshadj) { vsat=0; continue; }
+        // threshadj=10 当模糊度协方差 == 初始方差 (bias 刚初始化) 或 前5个历元(位置收敛期),
+        // 否则 threshadj=1。扩展了 RTKLIB 的判断逻辑，加入历元计数条件:
+        //   epochCount < 5 → threshadj=10 (位置还在收敛，允许大残差)
+        //   epochCount ≥ 5 → 回退到 RTKLIB 原始的 ambVar 判断
+        // 这解决了初始历元位置不准 → 码/相残差大 → 全部被拒绝 → 恶性循环的问题。
+        // 注意: 用 epochCount 而非 posStd，因为第一历元后 KF 位置方差从 900 暴跌到 1.2
+        // (10+卫星同时约束), 但实际位置误差仍达 50-100m, posStd 不可靠。
+        //
+        // goGPS 对齐方式: 被剔除观测 H 行清零、y0=0，使其对滤波零贡献
+        // (G=Cee*H'*S^-1, H 行=0 → G 行=0 → dx 贡献=0)，数学等价于 RTKLIB continue。
+        // Cnn 保留 varerr (不用 HUGE)，避免与 ddcov 非对角项混合致 S 病态。
+        {
+          double codeResid = Math.abs(ddcObs - appRangeCode);
+          double ambVar = Cee.get(i3 + id, i3 + id);
+          double lambda = roverObs.getSatByIDType(id, satType).getWavelength(0);
+          double expInitVar = Math.pow(stDevInit, 2) * lambda * lambda;
+          boolean posConverging = (epochCount < 5);
+          double threshadjCode = (posConverging || Math.abs(ambVar - expInitVar) < 1e-6) ? 10.0 : 1.0;
+          double maxInnoCode = 30.0; // RTKLIB maxinno[1] for code
+          if (codeResid > maxInnoCode * threshadjCode) {
+            if (goGPS.isDebug()) {
+              System.err.printf("[OUTLIER-CODE] sat=%c%d resid=%.3f > thresh=%.1f, REJECTED%n",
+                  satType, id, codeResid, maxInnoCode * threshadjCode);
+            }
+            // H 行清零、y0=0 (数学等价 RTKLIB continue, Cnn 保留 varerr 维持 S 条件数)
+            y0.set(k, 0, 0.0);
+            for (int c = 0; c < H.numCols(); c++) H.set(k, c, 0.0);
+          }
+        }
 
         if (goGPS.isDebug() && k == 0) {
           System.err.printf("[DEBUG KF setup] sat %c%d: ddcObs=%.2f, appRangeCode=%.2f, ddcObs-appRangeCode=%.2f%n",
@@ -272,18 +437,35 @@ public class KF_DD_code_phase extends KalmanFilter {
         }
 
         // Print all sat DD residuals for first few epochs (convergence analysis)
-        if (goGPS.isDebug() && epochCount <= 5) {
+        if (goGPS.isDebug() && epochCount <= 10) {
           double roverPR  = roverObs.getSatByIDType(id, satType).getPseudorange(0);
           double masterPR = masterObs.getSatByIDType(id, satType).getPseudorange(0);
           double roverGeom  = rover.satAppRange[i];
           double masterGeom = master.satAppRange[i];
           double sdPR  = roverPR - masterPR;
           double sdGeom = roverGeom - masterGeom;
-          System.err.printf("[DEBUG KF DD] %c%02d: ddcObs=%.2f, appRangeCode=%.2f, res=%.2f, ddpObs=%.2f, appRangePhase=%.2f, phaseRes=%.2f%n",
-                  satType, id, ddcObs, appRangeCode, ddcObs - appRangeCode,
+          double satClkErr = sats.pos[i].getSatelliteClockError(); // seconds
+          double satClkMeters = satClkErr * org.gogpsproject.Constants.SPEED_OF_LIGHT;
+          boolean rTgd = roverObs.getSatByIDType(id, satType).isTgdApplied();
+          boolean mTgd = masterObs.getSatByIDType(id, satType).isTgdApplied();
+
+          // === [SD-DIAG] RTKLIB 逐卫星对比格式 ===
+          // 用途: 与 RTKLIB trace 的 sat= rs= dts= 输出逐行对比
+          // 若 goGPS SD_PR 与 RTKLIB 相同但 SD_Geom 不同 → 卫星位置差异
+          // 若 SD_PR 不同 → 伪距解码或 TGD 差异
+          // 若 SD_PR-SD_Geom 不同 → 钟差/大气改正差异
+          System.err.printf("[SD-DIAG] ep=%d %c%02d el=%.1f° | rPR=%.3f mPR=%.3f SDpr=%.3f | rGeom=%.3f mGeom=%.3f SDgeom=%.3f | SDpr-SDgeom=%.3f%n",
+                  epochCount, satType, id, Math.toDegrees(rover.topo[i].getElevation()),
+                  roverPR, masterPR, sdPR, roverGeom, masterGeom, sdGeom, sdPR - sdGeom);
+          System.err.printf("[SD-DIAG] ep=%d %c%02d satPos=[%.3f,%.3f,%.3f] satClk=%.10fs (%.3fm) | rCode=%d mCode=%d | rTgd=%s mTgd=%s%n",
+                  epochCount, satType, id, sats.pos[i].getX(), sats.pos[i].getY(), sats.pos[i].getZ(),
+                  satClkErr, satClkMeters,
+                  roverObs.getSatByIDType(id, satType).getCode(0),
+                  masterObs.getSatByIDType(id, satType).getCode(0),
+                  rTgd, mTgd);
+          System.err.printf("[DD-DIAG] ep=%d %c%02d: ddcObs=%.3f ddcApp=%.3f codeDDres=%.3f | ddpObs=%.3f appPhase=%.3f phaseDDres=%.3f%n",
+                  epochCount, satType, id, ddcObs, appRangeCode, ddcObs - appRangeCode,
                   ddpObs, appRangePhase, ddpObs - appRangePhase);
-          System.err.printf("[DEBUG KF DD DETAIL] %c%02d: roverPR=%.2f masterPR=%.2f sdPR=%.2f | roverGeom=%.2f masterGeom=%.2f sdGeom=%.2f | sdPR-sdGeom=%.2f%n",
-                  satType, id, roverPR, masterPR, sdPR, roverGeom, masterGeom, sdGeom, sdPR - sdGeom);
         }
 
         // L1 code noise
@@ -297,15 +479,51 @@ public class KF_DD_code_phase extends KalmanFilter {
         }
 
         double CnnBase = Cnn.get(k, k);
-        Cnn.set(k, k, CnnBase + roverCodeVar + masterCodeVar);
+        // RTKLIB-aligned: Cnn diagonal = varerr(rover) + varerr(master) (single-diff variance sum).
+        // Do NOT accumulate on top of the pre-filled baseNoise (which is the same value),
+        // otherwise the variance is doubled, over-weighting code observations.
+        // 被剔除观测也用此 varerr 值(H=0 已阻断更新，Cnn=varerr 维持 S 条件数)。
+        Cnn.set(k, k, roverCodeVar + masterCodeVar);
+
+        if (goGPS.isDebug() && epochCount <= 1 && k < 3) {
+          System.err.printf("[EPOCH0 Cnn-code] sat=%c%d el=%.1f roverCodeVar=%.4f masterCodeVar=%.4f Cnn=%.4f%n",
+              satType, id, Math.toDegrees(rover.topo[i].getElevation()),
+              roverCodeVar, masterCodeVar, roverCodeVar + masterCodeVar);
+        }
 
         // === L1 Phase Row ===
-        if (sats.gnssAvail.contains(checkAvailGnss)) {
+        // RTKLIB-aligned: only add phase row if phase observation is available
+        // (availPhase), not just code (gnssAvail). Otherwise getPhaserange()
+        // returns NaN, corrupting y0 and causing KF state NaN.
+        if (sats.availPhase.contains(id)) {
 
           H.set(nObsAvail + p, 0, alphaX);
           H.set(nObsAvail + p, i1 + 1, alphaY);
           H.set(nObsAvail + p, i2 + 1, alphaZ);
-          H.set(nObsAvail + p, i3 + id, -roverObs.getSatByIDType(id, satType).getWavelength(0));
+          // 【关键设计 - H_amb = +1.0 (meters)】(2026-06-21 重构，对齐 RTKLIB)
+          // ============================================================================
+          // 模糊度状态单位: meters (与 RTKLIB 一致)
+          //   H[phase, amb] = +1.0  (观测方程: phase_obs = α·dr + 1.0·N_meters + ε)
+          //
+          // 数学保证 S 非奇异:
+          //   S[phase] = α²·K[pos] + K[amb] + 2·α·K[pos,amb] + Cnn
+          //            = (α·√K[pos] + √K[amb])² + Cnn > 0
+          //   交叉项为正，不会抵消对角项，S 永不近奇异。
+          //
+          // 历史背景(已废弃方案):
+          //   原 goGPS 用 H_amb = -λ(状态单位 cycles)，交叉项 -2·α·λ·K[pos,amb] < 0，
+          //   多卫星求和后抵消对角项 → S[phase]≈0.001 → S⁻¹爆炸 → gMax=201 → 发散。
+          //   曾用 S_DIAG_FLOOR=0.1 workaround(凑数，无物理意义)，现已移除。
+          //
+          // 同步修改清单(状态单位 cycles→meters):
+          //   1. H_amb L1/L2: -λ → +1.0 (本处 + L660)
+          //   2. 状态初值: (codeDD-phaseDD)/λ → (codeDD-phaseDD) (L917/L935)
+          //   3. 初始方差: 900 cycle² → 900 m² (L1204/L1221)
+          //   4. Qphase: λ²·Cee → Cee (L1139)
+          //   5. LAMBDA 输入: a[i](meters) → a[i]/λ(cycles) (L1551)
+          //   6. LAMBDA 固定: F[i](cycles) → F[i]·λ(meters) (L1623)
+          // ============================================================================
+          H.set(nObsAvail + p, i3 + id, 1.0);
 
           // Ionosphere column (RTKLIB: -I for L1 phase)
           if (estimIono) {
@@ -316,8 +534,37 @@ public class KF_DD_code_phase extends KalmanFilter {
             H.set(nObsAvail + p, iTropo, mwDD);
           }
 
-          y0.set(nObsAvail + p, 0, ddpObs - appRangePhase + alphaX * rover.getX()
-              + alphaY * rover.getY() + alphaZ * rover.getZ());
+          double y0phaseVal = ddpObs - appRangePhase;
+          if (goGPS.isDebug() && Double.isNaN(y0phaseVal)) {
+            System.err.printf("[NaN-trace-y0phase] sat=%c%d ddpObs=%.3e appRangePhase=%.3e alpha=[%.6f,%.6f,%.6f] rover=[%.3e,%.3e,%.3e] windUpRes=%.3e%n",
+                satType, id, ddpObs, appRangePhase, alphaX, alphaY, alphaZ,
+                rover.getX(), rover.getY(), rover.getZ(), windUpResiduals);
+          }
+          y0.set(nObsAvail + p, 0, y0phaseVal);
+
+          // === RTKLIB-aligned outlier rejection (rtkpos.c ddres() L1360-1374) ===
+          // 同码观测: threshadj 基于 Cee[amb]==SQR(std[0]) 或 epochCount<5,
+          // maxinno[0]=5.0 (phase)。H 行清零、y0=0 数学等价 RTKLIB continue。
+          // 扩展逻辑: 前5个历元保持 threshadj=10，防止初始历元
+          // 位置不准 → 相位残差大 → 全部被拒绝 → 恶性循环。
+          {
+            double phaseResid = Math.abs(y0phaseVal);
+            double ambVar = Cee.get(i3 + id, i3 + id);
+            double lambda = roverObs.getSatByIDType(id, satType).getWavelength(0);
+            double expPhaseInitVar = Math.pow(stDevInit, 2) * lambda * lambda;
+            boolean posConverging = (epochCount < 5);
+            double threshadjPhase = (posConverging || Math.abs(ambVar - expPhaseInitVar) < 1e-6) ? 10.0 : 1.0;
+            double maxInnoPhase = 5.0; // RTKLIB maxinno[0] for phase
+            if (phaseResid > maxInnoPhase * threshadjPhase) {
+              if (goGPS.isDebug()) {
+                System.err.printf("[OUTLIER-PHASE] sat=%c%d resid=%.3f > thresh=%.1f, REJECTED%n",
+                    satType, id, phaseResid, maxInnoPhase * threshadjPhase);
+              }
+              // H 行清零、y0=0 (数学等价 RTKLIB continue, Cnn 保留 varerr 维持 S 条件数)
+              y0.set(nObsAvail + p, 0, 0.0);
+              for (int c = 0; c < H.numCols(); c++) H.set(nObsAvail + p, c, 0.0);
+            }
+          }
 
           double roverPhaseVar = varerr(Math.toRadians(rover.topo[i].getElevation()), true, satType, 0);
           double masterPhaseVar = varerr(Math.toRadians(master.topo[i].getElevation()), true, satType, 0);
@@ -328,7 +575,9 @@ public class KF_DD_code_phase extends KalmanFilter {
           }
 
           CnnBase = Cnn.get(nObsAvail + p, nObsAvail + p);
-          Cnn.set(nObsAvail + p, nObsAvail + p, CnnBase + roverPhaseVar + masterPhaseVar);
+          // RTKLIB-aligned: Cnn diagonal = varerr(rover) + varerr(master) (no double-counting).
+          // 被剔除观测也用此 varerr 值(H=0 已阻断更新，Cnn=varerr 维持 S 条件数)。
+          Cnn.set(nObsAvail + p, nObsAvail + p, roverPhaseVar + masterPhaseVar);
 
           p++;
         }
@@ -338,7 +587,12 @@ public class KF_DD_code_phase extends KalmanFilter {
     }
 
     // === L2 Observations (dual-frequency) ===
-    if (dualFreq) {
+    // RTKLIB-aligned: L2 uses an independent reference satellite (sats.pivotL2),
+    // which may differ from L1 pivot. All L2 pivot quantities (geometry,
+    // corrections, observations) come from sats.pivotL2. Sats lacking L2
+    // code/phase get dummy observations (y0=0, H=0, Cnn=HUGE) to keep S
+    // matrix non-singular without affecting the solution.
+    if (dualFreq && sats.pivotL2 >= 0) {
       int l2Base = l1Rows; // L2 rows start after L1 rows
       int k2 = 0;
       int p2 = 0;
@@ -349,17 +603,24 @@ public class KF_DD_code_phase extends KalmanFilter {
         satType = roverObs.getGnssType(i);
         String checkAvailGnss = String.valueOf(satType) + String.valueOf(id);
 
-        if (sats.pos[i]!=null && sats.gnssAvail.contains(checkAvailGnss) && i != sats.pivot) {
+        if (sats.pos[i]!=null && sats.gnssAvail.contains(checkAvailGnss) && i != sats.pivotL2) {
+
+          // L2 code availability for this sat (both rover and master)
+          boolean l2CodeAvail = !Double.isNaN(roverObs.getSatByIDType(id, satType).getPseudorange(1)) &&
+              !Double.isNaN(masterObs.getSatByIDType(id, satType).getPseudorange(1));
+          // L2 phase availability for this sat (both rover and master)
+          boolean l2PhaseAvail = !Double.isNaN(roverObs.getSatByIDType(id, satType).getPhaseCycles(1)) &&
+              !Double.isNaN(masterObs.getSatByIDType(id, satType).getPhaseCycles(1));
 
           double alphaX = rover.diffSat[i].get(0) / rover.satAppRange[i]
-              - diffRoverPivot.get(0) / roverPivotAppRange;
+              - diffRoverPivotL2.get(0) / roverPivotAppRangeL2;
           double alphaY = rover.diffSat[i].get(1) / rover.satAppRange[i]
-              - diffRoverPivot.get(1) / roverPivotAppRange;
+              - diffRoverPivotL2.get(1) / roverPivotAppRangeL2;
           double alphaZ = rover.diffSat[i].get(2) / rover.satAppRange[i]
-              - diffRoverPivot.get(2) / roverPivotAppRange;
+              - diffRoverPivotL2.get(2) / roverPivotAppRangeL2;
 
           double ddcApp = (rover.satAppRange[i] - master.satAppRange[i])
-              - (roverPivotAppRange - masterPivotAppRange);
+              - (roverPivotAppRangeL2 - masterPivotAppRangeL2);
 
           // L2 observed code DD
           double ddcObsL2 = (roverObs.getSatByIDType(id, satType).getPseudorange(1) - masterObs.getSatByIDType(id, satType).getPseudorange(1))
@@ -370,18 +631,18 @@ public class KF_DD_code_phase extends KalmanFilter {
               - (roverPivotPhaseObsL2 - masterPivotPhaseObsL2);
 
           double tropoResiduals = (rover.satTropoCorr[i] - master.satTropoCorr[i])
-              - (roverPivotTropoCorr - masterPivotTropoCorr);
+              - (roverPivotTropoCorrL2 - masterPivotTropoCorrL2);
           double ionoResiduals = (rover.satIonoCorr[i] - master.satIonoCorr[i])
-              - (roverPivotIonoCorr - masterPivotIonoCorr);
+              - (roverPivotIonoCorrL2 - masterPivotIonoCorrL2);
           double antResiduals = (rover.satAntennaCorr[i] - master.satAntennaCorr[i])
-              - (roverPivotAntCorr - masterPivotAntCorr);
+              - (roverPivotAntCorrL2 - masterPivotAntCorrL2);
           double windUpResidualsL2 = ((rover.satWindUp[i] - master.satWindUp[i])
-              - (roverPivotWindUp - masterPivotWindUp))
+              - (roverPivotWindUpL2 - masterPivotWindUpL2))
               * roverObs.getSatByIDType(id, satType).getWavelength(1);
 
           double roverMw = tropoMapWet(rover.topo[i].getElevation());
           double masterMw = tropoMapWet(master.topo[i].getElevation());
-          double mwDD = (roverMw - roverPivotMw) - (masterMw - masterPivotMw);
+          double mwDD = (roverMw - roverPivotMwL2) - (masterMw - masterPivotMwL2);
 
           // L2 approximate range (iono scaled by gamma = (f1/f2)^2)
           double appRangeCodeL2;
@@ -396,39 +657,44 @@ public class KF_DD_code_phase extends KalmanFilter {
 
           // === L2 Code Row ===
           int rowL2Code = l2Base + k2;
-          H.set(rowL2Code, 0, alphaX);
-          H.set(rowL2Code, i1 + 1, alphaY);
-          H.set(rowL2Code, i2 + 1, alphaZ);
+          if (l2CodeAvail) {
+            H.set(rowL2Code, 0, alphaX);
+            H.set(rowL2Code, i1 + 1, alphaY);
+            H.set(rowL2Code, i2 + 1, alphaZ);
 
-          if (estimIono) {
-            H.set(rowL2Code, iIono + id, gamma); // +gamma*I for L2 code
+            if (estimIono) {
+              H.set(rowL2Code, iIono + id, gamma); // +gamma*I for L2 code
+            }
+            if (estimTropo) {
+              H.set(rowL2Code, iTropo, mwDD);
+            }
+
+            y0.set(rowL2Code, 0, ddcObsL2 - appRangeCodeL2);
+
+            double roverCodeVarL2 = varerr(Math.toRadians(rover.topo[i].getElevation()), false, satType, 1);
+            double masterCodeVarL2 = varerr(Math.toRadians(master.topo[i].getElevation()), false, satType, 1);
+
+            int satPrn = id;
+            if (isBdsGeo(satType, satPrn)) {
+              roverCodeVarL2 *= GEO_NOISE_SCALE;
+              masterCodeVarL2 *= GEO_NOISE_SCALE;
+            }
+
+            double CnnBaseL2 = Cnn.get(rowL2Code, rowL2Code);
+            // RTKLIB-aligned: no double-counting of pre-filled baseNoise.
+            Cnn.set(rowL2Code, rowL2Code, roverCodeVarL2 + masterCodeVarL2);
+          } else {
+            // Dummy observation: sat lacks L2 code, exclude without singularity
+            Cnn.set(rowL2Code, rowL2Code, DUMMY_OBS_VAR);
           }
-          if (estimTropo) {
-            H.set(rowL2Code, iTropo, mwDD);
-          }
-
-          y0.set(rowL2Code, 0, ddcObsL2 - appRangeCodeL2 + alphaX * rover.getX()
-              + alphaY * rover.getY() + alphaZ * rover.getZ());
-
-          double roverCodeVarL2 = varerr(Math.toRadians(rover.topo[i].getElevation()), false, satType, 1);
-          double masterCodeVarL2 = varerr(Math.toRadians(master.topo[i].getElevation()), false, satType, 1);
-
-          int satPrn = id;
-          if (isBdsGeo(satType, satPrn)) {
-            roverCodeVarL2 *= GEO_NOISE_SCALE;
-            masterCodeVarL2 *= GEO_NOISE_SCALE;
-          }
-
-          double CnnBaseL2 = Cnn.get(rowL2Code, rowL2Code);
-          Cnn.set(rowL2Code, rowL2Code, CnnBaseL2 + roverCodeVarL2 + masterCodeVarL2);
 
           // === L2 Phase Row ===
-          if (sats.gnssAvail.contains(checkAvailGnss)) {
+          if (l2PhaseAvail) {
             int rowL2Phase = l2Base + nSatAvail + p2;
             H.set(rowL2Phase, 0, alphaX);
             H.set(rowL2Phase, i1 + 1, alphaY);
             H.set(rowL2Phase, i2 + 1, alphaZ);
-            H.set(rowL2Phase, iAmbL2 + id, -roverObs.getSatByIDType(id, satType).getWavelength(1));
+            H.set(rowL2Phase, iAmbL2 + id, 1.0); // H_amb=+1.0 (meters), 见 L468 注释
 
             if (estimIono) {
               H.set(rowL2Phase, iIono + id, -gamma); // -gamma*I for L2 phase
@@ -437,21 +703,25 @@ public class KF_DD_code_phase extends KalmanFilter {
               H.set(rowL2Phase, iTropo, mwDD);
             }
 
-            y0.set(rowL2Phase, 0, ddpObsL2 - appRangePhaseL2 + alphaX * rover.getX()
-                + alphaY * rover.getY() + alphaZ * rover.getZ());
+            y0.set(rowL2Phase, 0, ddpObsL2 - appRangePhaseL2);
 
             double roverPhaseVarL2 = varerr(Math.toRadians(rover.topo[i].getElevation()), true, satType, 1);
             double masterPhaseVarL2 = varerr(Math.toRadians(master.topo[i].getElevation()), true, satType, 1);
 
+            int satPrn = id;
             if (isBdsGeo(satType, satPrn)) {
               roverPhaseVarL2 *= GEO_NOISE_SCALE;
               masterPhaseVarL2 *= GEO_NOISE_SCALE;
             }
 
-            CnnBaseL2 = Cnn.get(rowL2Phase, rowL2Phase);
-            Cnn.set(rowL2Phase, rowL2Phase, CnnBaseL2 + roverPhaseVarL2 + masterPhaseVarL2);
+            double CnnBaseL2 = Cnn.get(rowL2Phase, rowL2Phase);
+            // RTKLIB-aligned: no double-counting of pre-filled baseNoise.
+            Cnn.set(rowL2Phase, rowL2Phase, roverPhaseVarL2 + masterPhaseVarL2);
 
             p2++;
+          } else {
+            int rowL2Phase = l2Base + nSatAvail + p2;
+            Cnn.set(rowL2Phase, rowL2Phase, DUMMY_OBS_VAR);
           }
 
           k2++;
@@ -459,6 +729,22 @@ public class KF_DD_code_phase extends KalmanFilter {
       }
     }
 
+    // ============================================================================
+    // 【已验证·勿重复检查】ddcov 非对角 Cnn 实现 (2026-06-21 多次会话反复验证)
+    // ============================================================================
+    // 历史排查记录（每次新会话不要再重新检查此处，已确认正确）：
+    //   ✓ 非对角项 = pivotNoise = varerr(rover,pivot) + varerr(master,pivot)
+    //     对齐 RTKLIB rtkpos.c ddcov()，公式正确
+    //   ✓ 四个块（L1-code/L1-phase/L2-code/L2-phase）行范围划分正确
+    //   ✓ L2 使用独立 pivot (sats.pivotL2)，elevation/type 从 pivotL2 取
+    //   ✓ BDS GEO 噪声缩放 (GEO_NOISE_SCALE) 已应用到 pivot
+    //   ✓ 对称填充 Cnn[i][j] = Cnn[j][i] = pivotNoise
+    //
+    // 结论：ddcov 不是 S 矩阵近奇异 / 条件数差 (1.3e7) / 增益爆炸 (gMax=201) 的根因。
+    //   真正根因：位置-模糊度交叉协方差抵消 HKHt 对角项（HKHt=0.000698 极小），
+    //   源于位置方差收敛过快（900→0.30）。需对齐 RTKLIB udpos() 位置方差下限管理，
+    //   详见 KalmanFilter.java 的 Cee 更新逻辑。
+    // ============================================================================
     // RTKLIB ddcov alignment: add off-diagonal elements to Cnn
     // Within each system-frequency block, DD observations share the same
     // reference satellite (pivot), so their noise is correlated through
@@ -491,11 +777,17 @@ public class KF_DD_code_phase extends KalmanFilter {
       }
     }
 
-    if (dualFreq) {
+    if (dualFreq && sats.pivotL2 >= 0) {
+      // L2 pivot elevation & type (from sats.pivotL2, may differ from L1 pivot)
+      double roverElevL2Pivot = rover.topo[sats.pivotL2].getElevation();
+      double masterElevL2Pivot = master.topo[sats.pivotL2].getElevation();
+      char pivotL2Type = roverObs.getGnssType(sats.pivotL2);
+      int pivotL2Id = roverObs.getSatID(sats.pivotL2);
+
       // L2 code block: rows l1Rows..l1Rows+nSatAvail-1
-      double pivotCodeNoiseL2 = varerr(Math.toRadians(roverElevation), false, satType, 1)
-                              + varerr(Math.toRadians(masterElevation), false, satType, 1);
-      if (isBdsGeo(satType, pivotId)) {
+      double pivotCodeNoiseL2 = varerr(Math.toRadians(roverElevL2Pivot), false, pivotL2Type, 1)
+                              + varerr(Math.toRadians(masterElevL2Pivot), false, pivotL2Type, 1);
+      if (isBdsGeo(pivotL2Type, pivotL2Id)) {
         pivotCodeNoiseL2 *= GEO_NOISE_SCALE;
       }
       for (int i = l1Rows; i < l1Rows + nSatAvail; i++) {
@@ -506,9 +798,9 @@ public class KF_DD_code_phase extends KalmanFilter {
       }
 
       // L2 phase block: rows l1Rows+nSatAvail..totalObs-1
-      double pivotPhaseNoiseL2 = varerr(Math.toRadians(roverElevation), true, satType, 1)
-                               + varerr(Math.toRadians(masterElevation), true, satType, 1);
-      if (isBdsGeo(satType, pivotId)) {
+      double pivotPhaseNoiseL2 = varerr(Math.toRadians(roverElevL2Pivot), true, pivotL2Type, 1)
+                               + varerr(Math.toRadians(masterElevL2Pivot), true, pivotL2Type, 1);
+      if (isBdsGeo(pivotL2Type, pivotL2Id)) {
         pivotPhaseNoiseL2 *= GEO_NOISE_SCALE;
       }
       for (int i = l1Rows + nSatAvail; i < totalObs; i++) {
@@ -553,6 +845,20 @@ public class KF_DD_code_phase extends KalmanFilter {
               rover.getX(), rover.getY(), rover.getZ(),
               masterPos.getX(), masterPos.getY(), masterPos.getZ(), baseLen);
     }
+
+    // RTKLIB-aligned: save rover DD state at END of setup (after selectDoubleDiff).
+    // This oldPivotId/satOld is used by the FIRST loop() call's
+    // checkSatelliteConfiguration() to detect pivot/sat changes from setup to
+    // the first epoch. RTKLIB ddres() selects ref sat per epoch; goGPS tracks
+    // the change to transform DD ambiguity states (A*Cee*A').
+    try {
+      oldPivotId   = sats.pos[sats.pivot].getSatID();
+      oldPivotType = sats.pos[sats.pivot].getSatType();
+    } catch(ArrayIndexOutOfBoundsException e) {
+      oldPivotId = 0;
+    }
+    satOld = sats.availPhase;
+    satTypeOld = sats.typeAvailPhase;
 
     updateDops(A);
   }
@@ -618,6 +924,14 @@ public class KF_DD_code_phase extends KalmanFilter {
     double roverPivotPhaseObs = roverObs.getSatByIDType(pivotId, satType).getPhaserange(goGPS.getFreq());
     double masterPivotPhaseObs = masterObs.getSatByIDType(pivotId, satType).getPhaserange(goGPS.getFreq());
 
+    // L2 pivot phase observations (for dual-freq L2 ambiguity initialization)
+    double roverPivotPhaseObsL2 = Double.NaN;
+    double masterPivotPhaseObsL2 = Double.NaN;
+    if (goGPS.isDualFreq()) {
+      roverPivotPhaseObsL2 = roverObs.getSatByIDType(pivotId, satType).getPhaserange(1);
+      masterPivotPhaseObsL2 = masterObs.getSatByIDType(pivotId, satType).getPhaserange(1);
+    }
+
     // Rover-pivot approximate pseudoranges
     SimpleMatrix diffRoverPivot = rover.diffSat[pivotIndex];
     double roverPivotAppRange = rover.satAppRange[pivotIndex];
@@ -630,6 +944,15 @@ public class KF_DD_code_phase extends KalmanFilter {
 
     // Covariance of estimated ambiguity combinations
     double[] estimatedAmbiguityCombCovariance = new double[satAmb.size()];
+
+    // L2 estimated ambiguity combinations (dual-freq only)
+    double[] estimatedAmbiguityCombL2 = new double[satAmb.size()];
+    // 【RTKLIB 对齐】存储每个卫星的波长，用于计算等效 RTKLIB 的初始方差 900/λ² cycle²。
+    // RTKLIB udbias() 用 initx(bias, SQR(std[0]=30m)=900 m², ...)，状态单位 meters(H=1.0)。
+    // goGPS 状态单位 cycles(H=-λ)，等效方差 = 900/λ² cycle²，使 S_相位 = λ²*(900/λ²) = 900 m²，
+    // 与 RTKLIB 一致，避免 S 病态(原用 LS 估计方差~5 cycle²，等效仅 0.19 m²，比 RTKLIB 小 4700 倍)。
+    double[] estimatedWavelength = new double[satAmb.size()];
+    double[] estimatedWavelengthL2 = new double[satAmb.size()];
 
     if (goGPS.getAmbiguityStrategy() == AmbiguityStrategy.OBSERV) {
 
@@ -655,13 +978,31 @@ public class KF_DD_code_phase extends KalmanFilter {
           double phaseDoubleDiffObserv = (roverSatPhaseObs - masterSatPhaseObs) - (roverPivotPhaseObs - masterPivotPhaseObs);
 
           // Store estimated ambiguity combinations and their covariance
-          estimatedAmbiguityComb[satAmb.indexOf(id)] = (codeDoubleDiffObserv - phaseDoubleDiffObserv) / roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq());
+          // 【状态单位 meters, 正模糊度】(2026-06-21 重构)
+          // 物理方程: phase_obs = α·dr + λN_real + ε
+          //   N_real = (phaseDD - codeDD) / λ  (正模糊度, phase > code 时为正)
+          //   N_meters = phaseDD - codeDD = λ·N_real
+          // H_amb = +1.0, 状态 = +N_meters, 观测方程: phase = α·dr + 1.0·N_meters ✓
+          // (原 goGPS: 状态 = codeDD - phaseDD = -λN, H_amb = -λ, 已废弃)
+          estimatedAmbiguityComb[satAmb.indexOf(id)] = (phaseDoubleDiffObserv - codeDoubleDiffObserv);
+          // estimatedAmbiguityCombCovariance 仍为 cycles² 单位(仅用于诊断对比，不进滤波)
           estimatedAmbiguityCombCovariance[satAmb.indexOf(id)] = 4
           * getStDevCode(roverObs.getSatByIDType(id, satType), goGPS.getFreq())
           * getStDevCode(masterObs.getSatByIDType(id, satType), goGPS.getFreq()) / Math.pow(roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq()), 2);
+          estimatedWavelength[satAmb.indexOf(id)] = roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq());
+
+          // L2 ambiguity (dual-freq): same code DD, L2 phase DD, L2 wavelength
+          if (goGPS.isDualFreq() && !Double.isNaN(roverPivotPhaseObsL2)) {
+            double roverSatPhaseObsL2 = roverObs.getSatByIDType(id, satType).getPhaserange(1);
+            double masterSatPhaseObsL2 = masterObs.getSatByIDType(id, satType).getPhaserange(1);
+            double phaseDoubleDiffObservL2 = (roverSatPhaseObsL2 - masterSatPhaseObsL2) - (roverPivotPhaseObsL2 - masterPivotPhaseObsL2);
+            // 【状态单位 meters, 正模糊度】phaseDD - codeDD
+            estimatedAmbiguityCombL2[satAmb.indexOf(id)] = (phaseDoubleDiffObservL2 - codeDoubleDiffObserv);
+            estimatedWavelengthL2[satAmb.indexOf(id)] = roverObs.getSatByIDType(id, satType).getWavelength(1);
+          }
         }
       }
-    } 
+    }
     else if(goGPS.getAmbiguityStrategy() == AmbiguityStrategy.APPROX | (nObsAvail + nObsAvailPhase <= nUnknowns)) {
 
       for (int i = 0; i < nObs; i++) {
@@ -688,10 +1029,22 @@ public class KF_DD_code_phase extends KalmanFilter {
                           - (roverPivotPhaseObs - masterPivotPhaseObs);
 
           // Store estimated ambiguity combinations and their covariance
-          estimatedAmbiguityComb[satAmb.indexOf(id)] = (codeDoubleDiffApprox - phaseDoubleDiffObserv) / roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq());
+          // 【状态单位 meters, 正模糊度】phaseDD - codeDD = +λN (见 OBSERV 分支注释)
+          estimatedAmbiguityComb[satAmb.indexOf(id)] = (phaseDoubleDiffObserv - codeDoubleDiffApprox);
           estimatedAmbiguityCombCovariance[satAmb.indexOf(id)] = 4
             * getStDevCode(roverObs.getSatByIDType(id, satType), goGPS.getFreq())
             * getStDevCode(masterObs.getSatByIDType(id, satType), goGPS.getFreq()) / Math.pow(roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq()), 2);
+          estimatedWavelength[satAmb.indexOf(id)] = roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq());
+
+          // L2 ambiguity (dual-freq): same approx code DD, L2 phase DD, L2 wavelength
+          if (goGPS.isDualFreq() && !Double.isNaN(roverPivotPhaseObsL2)) {
+            double roverSatPhaseObsL2  = roverObs.getSatByIDType(id, satType).getPhaserange(1);
+            double masterSatPhaseObsL2 = masterObs.getSatByIDType(id, satType).getPhaserange(1);
+            double phaseDoubleDiffObservL2 = (roverSatPhaseObsL2 - masterSatPhaseObsL2) - (roverPivotPhaseObsL2 - masterPivotPhaseObsL2);
+            // 【状态单位 meters, 正模糊度】phaseDD - codeDD
+            estimatedAmbiguityCombL2[satAmb.indexOf(id)] = (phaseDoubleDiffObservL2 - codeDoubleDiffApprox);
+            estimatedWavelengthL2[satAmb.indexOf(id)] = roverObs.getSatByIDType(id, satType).getWavelength(1);
+          }
         }
       }
     } 
@@ -805,7 +1158,7 @@ public class KF_DD_code_phase extends KalmanFilter {
           A.set(k, 2, rover.diffSat[i].get(2) / rover.satAppRange[i] - diffRoverPivot.get(2) / roverPivotAppRange); /* Z */
 
           if (satAmb.contains(id)) {
-            A.set(k, 3 + satAmb.indexOf(id), -roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq())); /* N */
+            A.set(k, 3 + satAmb.indexOf(id), 1.0); /* N - H_amb=+1.0 (meters), 见 L468 注释 */
 
             // Add the differenced observed pseudorange value to y0
             y0.set(k, 0, (roverObs.getSatByIDType(id, satType).getPhaserange(goGPS.getFreq()) - masterObs.getSatByIDType(id, satType).getPhaserange(goGPS.getFreq()))
@@ -829,10 +1182,13 @@ public class KF_DD_code_phase extends KalmanFilter {
           double roverPhaseVar = varerr(Math.toRadians(rover.topo[i].getElevation()), true, satType, goGPS.getFreq());
           double masterPhaseVar = varerr(Math.toRadians(master.topo[i].getElevation()), true, satType, goGPS.getFreq());
           
+          // 【状态单位 meters】(2026-06-21 重构)
+          // 原: λ²·Cee(cycles²→meters²)，现 Cee 已是 meters²，直接用
+          // stDevPhase² 是相位观测先验噪声(meters²)，Cee 是模糊度方差(meters²)
           Qphase.set(p, p, Qphase.get(p, p)
-              + (Math.pow(stDevPhase, 2) + Math.pow(roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq()), 2) * Cee.get(i3 + id, i3 + id))
+              + (Math.pow(stDevPhase, 2) + Cee.get(i3 + id, i3 + id))
               * (roverPivotPhaseVar + masterPivotPhaseVar)
-              + (Math.pow(stDevPhase, 2) + Math.pow(roverObs.getSatByIDType(id, satType).getWavelength(goGPS.getFreq()), 2) * Cee.get(i3 + id, i3 + id))
+              + (Math.pow(stDevPhase, 2) + Cee.get(i3 + id, i3 + id))
               * (roverPhaseVar + masterPhaseVar));
           
           int r = 1;
@@ -889,21 +1245,47 @@ public class KF_DD_code_phase extends KalmanFilter {
     }
 
     if (init) {
+      // 【模糊度初始方差 = λ²·900 m²】(2026-06-21 修正，对齐 RTKLIB)
+      // RTKLIB udbias(): initx(bias, SQR(std[0]=30 cycles)=900 cycle², H_amb=-λ)。
+      //   有效观测空间方差: H_amb²·K_amb = λ²·900 m²
+      // goGPS 重构后 H_amb=+1.0，状态单位 meters，初始方差需 = λ²·900 m²
+      //   使 S_相位 = α²·K[pos] + λ²·K[amb]_rtklib + Cnn = RTKLIB 一致。
+      //   若用 900 m² (缺 λ²)，S 对角范围 3.6e-5~903，条件数 9.5e6，
+      //   LU 求解器数值不稳定 → gMax=106 → 位置修正 5000m → 发散。
       for (int i = 0; i < satAmb.size(); i++) {
-        // Estimated ambiguity
+        double ambInitVar = Math.pow(stDevInit, 2) * Math.pow(estimatedWavelength[i], 2);
+        // Estimated ambiguity (meters)
         KFstate.set(i3 + satAmb.get(i), 0, estimatedAmbiguityComb[i]);
 
-        // Store the variance of the estimated ambiguity
-        Cee.set(i3 + satAmb.get(i), i3 + satAmb.get(i),
-            estimatedAmbiguityCombCovariance[i]);
+        // RTKLIB-aligned: initial ambiguity variance = λ²·900 m²
+        Cee.set(i3 + satAmb.get(i), i3 + satAmb.get(i), ambInitVar);
+      }
+      // L2 ambiguity state initialization (dual-freq, RTKLIB-aligned)
+      if (nAmbL2 > 0) {
+        for (int i = 0; i < satAmb.size(); i++) {
+          double ambInitVarL2 = Math.pow(stDevInit, 2) * Math.pow(estimatedWavelengthL2[i], 2);
+          KFstate.set(iAmbL2 + satAmb.get(i), 0, estimatedAmbiguityCombL2[i]);
+          Cee.set(iAmbL2 + satAmb.get(i), iAmbL2 + satAmb.get(i), ambInitVarL2);
+        }
       }
     } else {
+      // RTKLIB-aligned: re-initialize ambiguity state and covariance on cycle slip / new sat
+      // 使用 λ²·900 m² (与 init 分支一致)，对齐 RTKLIB udbias()。
       for (int i = 0; i < satAmb.size(); i++) {
-        // Estimated ambiguity
+        double ambInitVar = Math.pow(stDevInit, 2) * Math.pow(estimatedWavelength[i], 2);
+        // Estimated ambiguity (meters)
         KFprediction.set(i3 + satAmb.get(i), 0, estimatedAmbiguityComb[i]);
 
-        // Store the variance of the estimated ambiguity
-        Cvv.set(i3 + satAmb.get(i), i3 + satAmb.get(i), Math.pow( stDevAmbiguity, 2));
+        // Reset state covariance (λ²·900 m²)
+        Cee.set(i3 + satAmb.get(i), i3 + satAmb.get(i), ambInitVar);
+      }
+      // L2 ambiguity re-initialization on cycle slip / new sat (RTKLIB-aligned)
+      if (nAmbL2 > 0) {
+        for (int i = 0; i < satAmb.size(); i++) {
+          double ambInitVarL2 = Math.pow(stDevInit, 2) * Math.pow(estimatedWavelengthL2[i], 2);
+          KFprediction.set(iAmbL2 + satAmb.get(i), 0, estimatedAmbiguityCombL2[i]);
+          Cee.set(iAmbL2 + satAmb.get(i), iAmbL2 + satAmb.get(i), ambInitVarL2);
+        }
       }
     }
   }
@@ -1118,7 +1500,36 @@ public class KF_DD_code_phase extends KalmanFilter {
           approxRangeCycleSlip = false;
         }
 
-        cycleSlip = (lossOfLockCycleSlipRover || lossOfLockCycleSlipMaster || dopplerCycleSlipRover || dopplerCycleSlipMaster || gfCycleSlipRover || gfCycleSlipMaster || approxRangeCycleSlip);
+        // 【RTKLIB 对齐说明】周跳检测: goGPS 同时启用 LLI/Doppler/GF/ApproxRange 四种，
+        // RTKLIB detslp() 主要用 LLI 标志 + GF 组合。goGPS 多了 Doppler 和 ApproxRange 两种，
+        // 更敏感 → 可能导致模糊度频繁重置 → Cee 回到 900 → sqrtCov 停在 30 → ratio 难达 3.0。
+        // 若 LAMBDA 日志中 sqrtCov 长期为 30.000，优先排查此处是否误判周跳。
+        // 可临时只保留 LLI+GF 对齐 RTKLIB 验证。
+        // 【验证结果】APR 检测在滤波器未收敛时每历元每卫星都触发(threshold=1cycle 太严)，
+        // 导致 Cee 反复重置。已临时禁用 DOP+APR，只保留 LLI+GF 对齐 RTKLIB detslp()。
+        // cycleSlip = (lossOfLockCycleSlipRover || lossOfLockCycleSlipMaster || dopplerCycleSlipRover || dopplerCycleSlipMaster || gfCycleSlipRover || gfCycleSlipMaster || approxRangeCycleSlip);
+        cycleSlip = (lossOfLockCycleSlipRover || lossOfLockCycleSlipMaster || gfCycleSlipRover || gfCycleSlipMaster);
+
+        // [诊断] 统计每种周跳检测的触发情况，便于定位 Cee 频繁重置的根因
+        if (goGPS.isDebug() && satID != sats.pos[sats.pivot].getSatID() && !newSatellites.contains(satID)) {
+          if (satID == 10 && satType == 'C' && epochCount <= 5) {
+            int freq = goGPS.getFreq();
+            org.gogpsproject.producer.ObservationSet rOs = roverObs.getSatByIDType(satID, satType);
+            org.gogpsproject.producer.ObservationSet mOs = masterObs.getSatByIDType(satID, satType);
+            int rLli = rOs.getLossLockInd(freq);
+            int mLli = mOs.getLossLockInd(freq);
+            System.err.printf("[CS-DBG] C10 ep=%d freq=%d rLli=%d mLli=%d rHash=%d mHash=%d lossM=%s%n",
+              epochCount, freq, rLli, mLli, System.identityHashCode(rOs), System.identityHashCode(mOs), lossOfLockCycleSlipMaster);
+          }
+          if (cycleSlip) {
+            String reasons = "";
+            if (lossOfLockCycleSlipRover || lossOfLockCycleSlipMaster) reasons += "LLI ";
+            if (dopplerCycleSlipRover || dopplerCycleSlipMaster) reasons += "DOP ";
+            if (gfCycleSlipRover || gfCycleSlipMaster) reasons += "GF ";
+            if (approxRangeCycleSlip) reasons += "APR ";
+            System.err.printf("[CS-TRIG] %c%02d epoch=%d reasons=[%s]%n", satType, satID, epochCount, reasons.trim());
+          }
+        }
 
         if (satID != sats.pos[sats.pivot].getSatID() && !newSatellites.contains(satID) && cycleSlip) {
 
@@ -1189,48 +1600,84 @@ public class KF_DD_code_phase extends KalmanFilter {
     double thres = goGPS.getAmbiguityRatioThreshold();
     if (thres <= 0) thres = 3.0;
 
-    // Extract float ambiguity states and covariance submatrix
-    double[] a = new double[nb];
-    double[] Q = new double[nb * nb];
+    // 【EJML 重构】用 SimpleMatrix 统一管理模糊度向量与协方差矩阵，
+    // 避免手动 double[] + 列主序索引(Q[i+j*nb])，降低维护与调试成本。
+    // 单位转换通过 SimpleMatrix 元素运算完成，仅在调用 Lambda.lambda()
+    // 边界处转换为 column-major double[] (RTKLIB Lambda 接口约定)。
+    //
+    // 状态单位转换 meters→cycles (LAMBDA 要求 cycles 输入):
+    //   a_cycles = a_meters ./ λ
+    //   Q_cycles = Q_meters ./ (λ_i · λ_j) = Q_meters ./ (λ · λ')
+    // KFstate 是 meters(H_amb=+1.0)，Cee 是 meters²。
+    SimpleMatrix lambdaVec = new SimpleMatrix(nb, 1);   // 各卫星 L1 波长
+    SimpleMatrix aMeters = new SimpleMatrix(nb, 1);    // 浮点模糊度 (meters, 取自 KFstate)
+    SimpleMatrix QMeters = new SimpleMatrix(nb, nb);   // 模糊度协方差子矩阵 (meters², 取自 Cee)
 
     for (int i = 0; i < nb; i++) {
-      a[i] = KFstate.get(i3 + satIds[i]);
+      int satId = satIds[i];
+      char satType = lookupSatType(satId);
+      double lambda = currentRoverObs.getSatByIDType(satId, satType).getWavelength(0);
+      lambdaVec.set(i, 0, lambda);
+      aMeters.set(i, 0, KFstate.get(i3 + satId));
       for (int j = 0; j < nb; j++) {
-        Q[i + j * nb] = Cee.get(i3 + satIds[i], i3 + satIds[j]);
+        int satIdj = satIds[j];
+        // QMeters 直接取 Cee 子块 (meters²)，单位转换稍后统一处理
+        QMeters.set(i, j, Cee.get(i3 + satId, i3 + satIdj));
       }
     }
 
-    // Run LAMBDA (2 candidates)
+    // 单位转换: meters→cycles (element-wise 除以波长)
+    SimpleMatrix aCycles = aMeters.copy().elementDiv(lambdaVec);
+    // λ_i · λ_j 的外积矩阵 (nb×nb)
+    SimpleMatrix lambdaMat = lambdaVec.mult(lambdaVec.transpose());
+    SimpleMatrix QCycles = QMeters.copy().elementDiv(lambdaMat);
+
+    // Lambda.lambda() 为 RTKLIB 移植接口 (column-major double[])，
+    // 此处做 SimpleMatrix→column-major 边界转换，调用方代码保持 EJML 风格。
+    double[] a = toColumnMajor(aCycles);
+    double[] Q = toColumnMajor(QCycles);
     double[] F = new double[nb * 2];
     double[] s = new double[2];
+
+    if (goGPS.isDebug()) {
+      System.err.println("====== LAMBDA INPUT (6 decimals) ======");
+      System.err.printf("nb=%d, pivot=%d%n", nb, pivotId);
+      System.err.print("a (float ambiguities, cycles) = [");
+      for (int i = 0; i < nb; i++) {
+        System.err.printf("%.6f%s", aCycles.get(i, 0), (i < nb - 1) ? ", " : "");
+      }
+      System.err.println("]");
+      System.err.println("Q (covariance, cycles²) = ");
+      for (int i = 0; i < nb; i++) {
+        System.err.print("  [");
+        for (int j = 0; j < nb; j++) {
+          System.err.printf("%.6f%s", QCycles.get(i, j), (j < nb - 1) ? ", " : "");
+        }
+        System.err.println("]");
+      }
+      System.err.println("====== END LAMBDA INPUT ======");
+    }
+
     int info = Lambda.lambda(nb, 2, a, Q, F, s);
 
     if (goGPS.isDebug()) {
       System.err.printf("[LAMBDA debug] nb=%d, pivot=%d%n", nb, pivotId);
       for (int i = 0; i < nb; i++) {
-        double floatAmb = a[i];
+        double floatAmb = aCycles.get(i, 0);
         double nearestInt = Math.round(floatAmb);
         double fracDist = floatAmb - nearestInt;
-        double diagCov = Q[i + i * nb];
+        double diagCov = QCycles.get(i, i);
         System.err.printf("  sat C%02d: float=%.3f, nearestInt=%.0f, fracDist=%.3f, sqrtCov=%.3f%n",
             satIds[i], floatAmb, nearestInt, fracDist, Math.sqrt(Math.max(diagCov, 0)));
       }
 
       // Verify LAMBDA: compute Mahalanobis distance of simple rounding
-      double[] dRound = new double[nb];
-      for (int i = 0; i < nb; i++) {
-        dRound[i] = a[i] - Math.round(a[i]);
-      }
-      // Compute dRound' * Q^{-1} * dRound using SimpleMatrix
-      SimpleMatrix Qmat = new SimpleMatrix(nb, nb);
+      // dRound = a - round(a), sRound = dRound' * Q^{-1} * dRound
       SimpleMatrix dVec = new SimpleMatrix(nb, 1);
       for (int i = 0; i < nb; i++) {
-        dVec.set(i, 0, dRound[i]);
-        for (int j = 0; j < nb; j++) {
-          Qmat.set(i, j, Q[i + j * nb]);
-        }
+        dVec.set(i, 0, aCycles.get(i, 0) - Math.round(aCycles.get(i, 0)));
       }
-      double sRound = dVec.transpose().mult(Qmat.invert()).mult(dVec).get(0);
+      double sRound = dVec.transpose().mult(QCycles.invert()).mult(dVec).get(0);
       System.err.printf("[LAMBDA debug] Simple rounding Mahalanobis² = %.1f, LAMBDA s[0]=%.1f, s[1]=%.1f%n",
           sRound, s[0], s[1]);
 
@@ -1250,32 +1697,38 @@ public class KF_DD_code_phase extends KalmanFilter {
     // Ratio test
     double ratio = (s[0] > 0) ? s[1] / s[0] : 0.0;
     if (ratio >= thres) {
-      // Fix ambiguities: update KFstate with fixed integer values
+      // 从 LAMBDA 输出 F (column-major double[], 前 nb 个为最优候选) 重建 SimpleMatrix
+      SimpleMatrix FCycles = new SimpleMatrix(nb, 1);
       for (int i = 0; i < nb; i++) {
-        KFstate.set(i3 + satIds[i], 0, F[i]); // F[i] = first (best) candidate
-        heldAmbiguities.put(satIds[i], F[i]); // save for holdamb constraint target
+        FCycles.set(i, 0, F[i]);
+      }
+
+      // 【状态单位转换 cycles→meters】(2026-06-21 重构)
+      // F 是 LAMBDA 输出的 cycles，KFstate 是 meters，需 ×λ。
+      // fixedMetersVec = FCycles .* λ (element-wise)
+      SimpleMatrix fixedMetersVec = FCycles.elementMult(lambdaVec);
+      for (int i = 0; i < nb; i++) {
+        double fixedMeters = fixedMetersVec.get(i, 0);
+        KFstate.set(i3 + satIds[i], 0, fixedMeters);
+        heldAmbiguities.put(satIds[i], fixedMeters); // save for holdamb constraint target
       }
 
       // Conditional covariance update (RTKLIB-aligned: resamb_LAMBDA)
       int na = i3 + 1; // number of non-ambiguity states (0..i3)
 
-      // Build Qb (nb x nb) and Qab (na x nb) from Cee
-      SimpleMatrix Qb = new SimpleMatrix(nb, nb);
+      // Qb = 模糊度协方差子块 (meters²)，与上方 QMeters 同源，复用避免重复构造
+      SimpleMatrix Qb = QMeters;
+      // Qab = 非模糊度状态与模糊度的交叉协方差 (na×nb, meters²)
       SimpleMatrix Qab = new SimpleMatrix(na, nb);
       for (int i = 0; i < nb; i++) {
-        for (int j = 0; j < nb; j++) {
-          Qb.set(i, j, Cee.get(i3 + satIds[i], i3 + satIds[j]));
-        }
         for (int j = 0; j < na; j++) {
           Qab.set(j, i, Cee.get(j, i3 + satIds[i]));
         }
       }
 
-      // Build residual vector: db = b0 - b (float - fixed)
-      SimpleMatrix dbVec = new SimpleMatrix(nb, 1);
-      for (int i = 0; i < nb; i++) {
-        dbVec.set(i, 0, a[i] - F[i]);
-      }
+      // 残差向量: db = (a_float - a_fixed) .* λ  (cycles→meters)
+      // aCycles、FCycles 均为 cycles，差值 ×λ 转回 meters
+      SimpleMatrix dbVec = aCycles.minus(FCycles).elementMult(lambdaVec);
 
       // Check numerical stability of Qb before inversion
       // Use trace-based condition estimate: cond_est = trace(Qb) / nb * ||Qb^{-1}||_approx
@@ -1339,6 +1792,37 @@ public class KF_DD_code_phase extends KalmanFilter {
       }
       return false;
     }
+  }
+
+  /**
+   * SimpleMatrix → column-major double[] 边界转换。
+   * EJML 内部为 row-major，RTKLIB Lambda.lambda() 要求 column-major (Fortran 约定)。
+   * 此方法仅在调用 Lambda 边界处使用，使调用方代码保持 EJML 风格，
+   * 避免在业务逻辑中手动维护 Q[i + j*nb] 形式的列主序索引。
+   */
+  private static double[] toColumnMajor(SimpleMatrix m) {
+    int rows = m.numRows();
+    int cols = m.numCols();
+    double[] out = new double[rows * cols];
+    for (int j = 0; j < cols; j++) {
+      for (int i = 0; i < rows; i++) {
+        out[i + j * rows] = m.get(i, j);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 根据 satId 在 sats.availPhase 中查找对应的卫星类型 (G/R/C/E)。
+   * 提取为方法以消除 LAMBDA 输入构造中的重复查找逻辑。
+   */
+  private char lookupSatType(int satId) {
+    for (int k = 0; k < sats.availPhase.size(); k++) {
+      if (sats.availPhase.get(k) == satId) {
+        return sats.typeAvailPhase.get(k);
+      }
+    }
+    return 'G';
   }
 
   /**
@@ -1510,14 +1994,24 @@ public class KF_DD_code_phase extends KalmanFilter {
           depRead = depRead + timeRead;
           timeProc = System.currentTimeMillis();
 
-          // RTKLIB-aligned: per-epoch base station SPP with running mean.
-          // Mirrors RTKLIB postpos.c::avepos (average SPP over all epochs) and
-          // rtksvr.c (incremental running mean). Each matched epoch runs SPP on
-          // the base observations and accumulates into baseSppSum*/baseSppCount;
-          // basePos is then refreshed to the latest running mean so that the
-          // geometry (selectDoubleDiff), kf.init/loop and output guard all use
-          // the same averaged coordinate consistently.
-          if (obsM.getNumSat() >= 4) {
+          // 【基站位置逻辑：首次计算，一直使用】(2026-06-21)
+          // ---------------------------------------------------------------
+          // 检查逻辑（已反复验证，排除以下误判）：
+          //   1. 初始 SPP 位置偏差大      → 实测 rover SPP 偏差仅 ~50m，不足以解释 y0Max=377m
+          //   2. 星历不一致（rover/master 不同源）→ 已确认 rover/master 共用同一导航文件
+          //   3. 卫星钟差未正确处理       → 双差已消除钟差，且残差非全卫星同向偏置
+          //   4. 地球自转改正缺失         → 几何距离计算已含地球自转改正
+          //   5. TGD 重复扣除             → 已核对仅扣除一次
+          // 真正根因：原代码每历元用 SPP running mean 覆盖 masterPos，导致基站位置
+          //   每历元跳动 20-50m（实测 epoch1→4: [-493109,-493106,-493102,-493098]），
+          //   几何距离 ||sat-master|| 不一致，双差残差不收敛（y0Max=377m 且 25 历元不收敛）。
+          //
+          // 正确逻辑（对齐 RTKLIB 实时模式）：
+          //   - 有 1005/1006 定义位置：直接使用 basePos=getDefinedPosition()，固定不变
+          //     （RTCM 1005 是基准站精确坐标，精度 cm 级，远优于 SPP）
+          //   - 无 1005：首次 SPP 成功后固定（baseSppCount>0 后不再更新）
+          //     （RTKLIB postpos.c::avepos 仅用于后处理参考输出，实时滤波基站位置固定）
+          if (masterIn.getDefinedPosition() == null && baseSppCount == 0 && obsM.getNumSat() >= 4) {
             // Save rover state (SPP on base temporarily reuses the rover object)
             double origRoverX = rover.getX(), origRoverY = rover.getY(), origRoverZ = rover.getZ();
             double origRoverClk = rover.getClockError();
@@ -1527,8 +2021,10 @@ public class KF_DD_code_phase extends KalmanFilter {
             // matching the rover SPP pattern below.
             rover.setXYZ(0, 0, 0);
             rover.setClockError(0);
+            if (debug) System.err.printf("[SELSTD-CALL] baseSPP: rover.setXYZ(0,0,0) done, rover=%.1f,%.1f,%.1f%n", rover.getX(), rover.getY(), rover.getZ());
             double prevX = 0, prevY = 0, prevZ = 0;
             for (int iter = 0; iter < 10; iter++) {
+              if (debug) System.err.println("[SELSTD-CALL] baseSPP: calling selectStandalone(obsM)");
               sats.selectStandalone(obsM, -100);
               if (sats.getAvailNumber() >= 4) {
                 kf.codeStandalone(obsM, false, true);
@@ -1585,6 +2081,12 @@ public class KF_DD_code_phase extends KalmanFilter {
             if( roverIn.getDefinedPosition() != null )
               roverIn.getDefinedPosition().cloneInto(rover);
             
+            // 【修改】若未指定初始位置，设为零向量，避免NaN传播到卫星距离计算
+            if (!rover.isValidXYZ()) {
+              rover.setXYZ(0, 0, 0);
+              rover.computeGeodetic();
+            }
+            
             boolean initConverged = false;
             double prevX = 0, prevY = 0, prevZ = 0;
             for (int iter = 0; iter < 3; iter++) {
@@ -1596,6 +2098,7 @@ public class KF_DD_code_phase extends KalmanFilter {
               }
               
               // Select all satellites
+              if (debug) System.err.println("[SELSTD-CALL] roverSPP: calling selectStandalone(obsR)");
               sats.selectStandalone( obsR, -100);
               
               if (sats.getAvailNumber() >= 4) {

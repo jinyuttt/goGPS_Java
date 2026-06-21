@@ -131,33 +131,26 @@ public abstract class Core {
     double sinel = Math.sin(el);
     if (sinel <= 0.0) sinel = 0.01;
 
-    double a, b;
-    if (isPhase) {
-      a = 0.003; // carrier-phase error factor err[1] (m), RTKLIB default
-      b = 0.003; // carrier-phase error factor err[2] (m), RTKLIB default
-    } else {
-      a = 0.3; // code error factor err[1] (m), RTKLIB default
-      b = 0.3; // code error factor err[2] (m), RTKLIB default
-    }
+    // RTKLIB err[] defaults: {100.0, 0.003, 0.003, 0.0, 1.0, 52.0, 0.0, 0.0}
+    // err[1] = base term (m), err[2] = elevation term (m)
+    double err1 = 0.003;
+    double err2 = 0.003;
+
+    // RTKLIB eratio[] defaults: {300.0, 300.0, 300.0, 300.0}
+    // Code: fact = eratio[frq] = 300.0
+    // Phase: fact = eratio[frq] / eratio[0] = 300.0 / 300.0 = 1.0
+    double eratio0 = 300.0;
+    double eratioF = 300.0;
+    double fact = isPhase ? (eratioF / eratio0) : eratioF;
 
     // System-dependent error factor (RTKLIB: EFACT_GPS=1.0, EFACT_GLO=1.5, EFACT_SBS=3.0)
-    double fact = RtkLibConstants.errorFactorForSatType(satType);
-
-    // Frequency-dependent error ratio (RTKLIB eratio[f-nf], default 1.0 for all frequencies)
-    // TODO: make eratio configurable per frequency (e.g., L5 lower noise)
-    // For now, all frequencies use the same ratio (1.0), matching RTKLIB defaults.
-    // double eratio = (freq >= 1) ? goGPS.getErario(freq) : 1.0;
-    // if (eratio <= 0) eratio = 1.0;
-    // fact *= eratio;
+    fact *= RtkLibConstants.errorFactorForSatType(satType);
 
     // RTKLIB: a = fact * err[1], b = fact * err[2]
-    // Then var = 2.0 * (a² + b²/sin² + c²) + d²
-    // This means fact is squared: fact² * err[1]²
-    a = fact * a;
-    b = fact * b;
+    double a = fact * err1;
+    double b = fact * err2;
 
     // Baseline-dependent error term: c = err[3] * bl / 1E4 (RTKLIB default err[3]=0)
-    // c is NOT multiplied by fact (RTKLIB: c = opt->err[3]*bl/1E4, no fact)
     double errBaseline = 0.0;
     double c = errBaseline * bl / 1E4;
 
@@ -165,10 +158,7 @@ public abstract class Core {
     double sclkstab = 5e-12; // RTKLIB default sclkstab
     double d = RtkLibConstants.CLIGHT * sclkstab * dt;
 
-    // IFLC (iono-free LC) factor: 3.0 when using iono-free combination
-    // TODO: pass ionoopt to enable IFLC noise amplification
-    // double iflcFactor = (ionoopt == IONOOPT_IFLC) ? 3.0 : 1.0;
-
+    // var = 2.0 * (a² + b²/sin²(el) + c²) + d²
     return 2.0 * (a * a + b * b / (sinel * sinel) + c * c) + d * d;
   }
   

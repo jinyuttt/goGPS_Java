@@ -56,6 +56,11 @@ public abstract class EphemerisSystem {
 //		char satType2 = eph.getSatType() ;
 		if(satType == 'C'){  // BeiDou
 
+					// 【RTKLIB 对齐说明】TGD(信号群延迟)处理:
+					// RTKLIB eph2clk() 计算卫星钟差时【不包含】TGD，TGD 只在伪距观测值层扣除。
+					// goGPS 与此一致: 这里把 TGD 一次性扣到伪距上，computeSatelliteClockError()
+					// 返回的钟差不含 TGD。isTgdApplied 标志防止重复扣除(同一历元可能多次调用)。
+					// 若伪距残差异常大，核查: ①TGD 是否被重复扣 ②非 BDS 卫星是否漏扣 TGD。
 					// TGD is signal group delay, NOT part of satellite clock error
 					// Reference: BDS ICD. TGD only affects pseudorange observation, not clock/transmit time
 					double tgdCorrection = eph.getTgd() * Constants.SPEED_OF_LIGHT; // seconds -> meters
@@ -77,8 +82,9 @@ public abstract class EphemerisSystem {
 						correctedPR = obsPseudorange; // Already corrected, use as-is
 					}
 
-					// Compute satellite clock error using raw pseudorange (TGD NOT in clock error)
-					double satelliteClockError = computeSatelliteClockError(unixTime, eph, obsPseudorange);
+					// RTKLIB-aligned: compute satellite clock error using TGD-corrected pseudorange
+					// RTKLIB eph2clk() uses: t = time - P/CLIGHT, where P is TGD-corrected
+					double satelliteClockError = computeSatelliteClockError(unixTime, eph, correctedPR);
 					if (Double.isNaN(satelliteClockError)) {
 						return null; // Satellite unhealthy, exclude from solution
 					}
@@ -101,8 +107,8 @@ public abstract class EphemerisSystem {
 				// Both transmitTime and eph.getToe() are in GPST
 				double tk = checkGpsTime(transmitTimeGPST - eph.getToe());
 
-				// 调试：打印北斗卫星位置计算关键参数（GEO卫星及BDS-3卫星）
-				if (false && (satID <= 5 || satID >= 59)) {
+				// 调试：打印北斗卫星位置计算关键参数（前5个历元）
+				if (satID <= 5 || satID >= 59) {
 					System.err.printf("[DEBUG BDS] PRN=%d, obsPseudorange=%.2f m, TGDcorr=%.2f m%n",
 							satID, obsPseudorange, tgdCorrection);
 					System.err.printf("[DEBUG BDS] satelliteClockError=%.6f s (%.2f m)%n",
@@ -737,7 +743,10 @@ public abstract class EphemerisSystem {
 	protected SimpleMatrix computeEarthRotationCorrection(long unixTime, double receiverClockError, double transmissionTime, char satType) {
 
 		double receptionTime = (new Time(unixTime)).getGpsTime();
-		double traveltime = receptionTime + receiverClockError - transmissionTime;
+		// RTKLIB-aligned: Sagnac correction uses geometric travel time only.
+		// Receiver clock error affects pseudorange measurement, not the geometric
+		// travel time used for Earth rotation correction.
+		double traveltime = receptionTime - transmissionTime;
 
 		// Compute rotation angle: use system-specific Earth angular velocity
 		// GPS: 7.2921151467E-5, GLO: 7.292115E-5, GAL: 7.2921151467E-5, BDS: 7.292115E-5, QZS: 7.2921151467E-5

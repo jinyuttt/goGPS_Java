@@ -117,16 +117,19 @@ public class GoGPS implements Runnable, StreamEventProducer{
   /** Tropospheric estimation option (RTKLIB-aligned: TROPOPT_EST by default) */
   private TropOpt tropOpt = TropOpt.EST;
 
-  /** Ionospheric process noise (m²/s, RTKLIB default: 1e-4) */
-  private double prnIono = 1e-4;
+  /** Ionospheric process noise std (m, RTKLIB prn[1]=1e-3, scaled by bl/1E4*cos(el)) */
+  private double prnIono = 1e-3;
 
-  /** Tropospheric process noise (m²/s, RTKLIB default: 1e-8) */
-  private double prnTropo = 1e-8;
+  /** Tropospheric process noise std (m, RTKLIB prn[2]=1e-4, variance=SQR(prn)*dt) */
+  private double prnTropo = 1e-4;
 
-  /** Initial ionospheric sigma (m, RTKLIB default: 0.03) */
+  /** Ambiguity process noise std (m, RTKLIB prn[0]=1e-4, variance=SQR(prn)*dt) */
+  private double prnAmb = 1e-4;
+
+  /** Initial ionospheric sigma (m, RTKLIB std[1]=0.03, scaled by bl/1E4) */
   private double sigIono = 0.03;
 
-  /** Initial tropospheric sigma (m, RTKLIB default: 0.3) */
+  /** Initial tropospheric sigma (m, RTKLIB std[2]=0.3) */
   private double sigTropo = 0.3;
 
   public static enum CycleSlipDetectionStrategy {
@@ -236,8 +239,8 @@ public class GoGPS implements Runnable, StreamEventProducer{
   /** Chi-square innovation test threshold (sigma, RTKLIB-aligned, default 5.0) */
   private double chiSquareThreshold = 5.0;
 
-  /** GF (Geometry-Free) cycle-slip detection threshold (m, default 0.05) */
-  private double gfCycleSlipThreshold = 0.05;
+  /** GF (Geometry-Free) cycle-slip detection threshold (m, default 0.10) */
+  private double gfCycleSlipThreshold = 0.10;
 
   /** Max epoch time difference for master-rover alignment (ms, default 500) */
   private long maxTimeDiffMs = 500;
@@ -544,6 +547,8 @@ public class GoGPS implements Runnable, StreamEventProducer{
   public void setSigIono(double v) { this.sigIono = v; }
   public double getSigTropo() { return sigTropo; }
   public void setSigTropo(double v) { this.sigTropo = v; }
+  public double getPrnAmb() { return prnAmb; }
+  public void setPrnAmb(double v) { this.prnAmb = v; }
 
   /**
    * Gets the weights.
